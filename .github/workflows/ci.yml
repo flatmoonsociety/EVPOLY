@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Rustfmt
+        run: cargo fmt --all -- --check
+      - name: Cargo Check
+        run: cargo check --all-targets
+      - name: Cargo Test
+        run: cargo test --all-targets --quiet
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@cargo-audit
+      - name: Security Audit
+        run: ./scripts/security_audit.sh

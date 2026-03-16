@@ -1,0 +1,29 @@
+# EVPOLY cargo-audit policy
+#
+# Notes:
+# - `deny = ["warnings"]` keeps audit strict (new warnings fail).
+# - Temporary exceptions are time-boxed with expiry metadata in comments.
+# - `scripts/security_audit.sh` enforces expiry dates before running cargo-audit.
+
+[advisories]
+informational_warnings = ["unmaintained", "unsound", "notice"]
+ignore = [
+  # expires: 2026-04-15 id: RUSTSEC-2026-0037 reason: quinn-proto is present in Cargo.lock but has no active dependency path for current target/features.
+  "RUSTSEC-2026-0037",
+  # expires: 2026-05-31 id: RUSTSEC-2025-0134 reason: direct reqwest 0.11 path still pulls rustls-pemfile; planned reqwest upgrade window.
+  "RUSTSEC-2025-0134",
+  # expires: 2026-06-30 id: RUSTSEC-2025-0012 reason: transitive in polymarket-client-sdk; awaiting upstream migration off backoff.
+  "RUSTSEC-2025-0012",
+  # expires: 2026-06-30 id: RUSTSEC-2024-0384 reason: transitive via backoff in polymarket-client-sdk.
+  "RUSTSEC-2024-0384",
+  # expires: 2026-06-30 id: RUSTSEC-2024-0436 reason: proc-macro dependency via alloy stack; runtime impact is low.
+  "RUSTSEC-2024-0436",
+  # expires: 2026-06-30 id: RUSTSEC-2024-0388 reason: lockfile-only advisory in current build graph; no reachable path from active target/features.
+  "RUSTSEC-2024-0388",
+]
+
+[output]
+deny = ["warnings"]
+format = "terminal"
+quiet = false
+show_tree = true

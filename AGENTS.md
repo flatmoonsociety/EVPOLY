@@ -1,0 +1,104 @@
+# EVPOLY Agent Notes
+
+## Mandatory Update Rule
+
+- If any strategy logic, checkpoint schedule, entry/exit behavior, risk gate, sizing, or strategy env defaults are changed, update `strategy-changelog.md` in the same task.
+- Add a dated entry under `## Change Log` describing:
+  - what changed,
+  - which strategy/timeframe/symbol it affects,
+  - key env or code path touched.
+
+## Scope
+
+Strategies include (minimum):
+- `premarket_v1`
+- `endgame_sweep_v1`
+- `evcurve_v1`
+- `sessionband_v1`
+- `evsnipe_v1`
+- `mm_rewards_v1`
+
+## Details: Low-Level AI Operating Guide
+
+### 1) Mission
+- Ship safe, minimal diffs.
+- Preserve runtime behavior unless explicitly requested to change.
+- Keep docs and env examples aligned with runtime.
+
+### 2) Repo Map
+- Main runtime: `src/main.rs`
+- Premarket scheduler: `src/strategy_decider.rs`
+- Strategy configs:
+  - `src/config.rs` (endgame/global)
+  - `src/evcurve.rs`
+  - `src/sessionband.rs`
+  - `src/evsnipe.rs`
+  - `src/mm/mod.rs`
+- Shared sizing policy: `src/size_policy.rs`
+- Manual HTTP API: `src/bin/manual_bot.rs`
+- Alpha service binary: `src/bin/alpha_service.rs`
+- Env templates: `.env.example`, `.env.full.example`
+- Strategy behavior history: `strategy-changelog.md`
+
+### 3) Current Runtime Defaults
+- Strategy toggles:
+  - ON: premarket, endgame, evcurve, sessionband, evsnipe
+  - OFF: mm_rewards
+- Global symbols default enabled: `BTC, ETH, SOL, XRP`
+- MM mode default: `auto`
+
+### 4) Known Combo Constraints
+- `mm_rewards_v1` should run alone.
+- `endgame_sweep_v1` and `sessionband_v1` should not run together.
+- See `docs/strategy_combos.md`.
+
+### 5) Remote Dependency Facts
+- Shared timeframe discovery: remote-first with local fallback.
+- EVSnipe discovery: remote-first (alpha host failover) with local fallback.
+- Premarket alpha:
+  - remote-first,
+  - transport/timeout/connect errors fallback to local 50/50,
+  - other alpha errors fail-closed.
+- Endgame/EVcurve/SessionBand alpha:
+  - remote decision path,
+  - unavailable/invalid responses skip decision (strategy-specific skip behavior).
+- MM rewards:
+  - remote alpha for selection only,
+  - preflight is local in bot runtime,
+  - market discovery path is local.
+
+### 6) Required Work Sequence for Any Task
+1. Run `git status --short`.
+2. Inspect target code paths with `rg` and focused reads.
+3. Implement only requested changes.
+4. If strategy behavior/defaults changed, update `strategy-changelog.md`.
+5. Run local CI-equivalent checks before push, in this order:
+   - `cargo fmt --all -- --check`
+   - `cargo check --all-targets`
+   - `cargo test --all-targets --quiet`
+   - `./scripts/security_audit.sh`
+6. Re-check `git status --short` and diff.
+7. Commit with clear scope message.
+
+### 7) Editing Rules
+- Do not revert unrelated user changes.
+- Do not use destructive git commands.
+- Keep comments concise and useful.
+- Prefer consistency with existing architecture.
+
+### 8) Manual Endpoint Facts
+- Binary: `manual_bot`
+- Auth headers:
+  - `x-evpoly-manual-token`
+  - `x-evpoly-admin-token`
+- Open/close semantics:
+  - `/manual/open` is BUY path
+  - `/manual/close` is reduce-only SELL path
+  - `tp_price` allowed for open only
+- Full route guide: `docs/manual_endpoint_guide.md`
+
+### 9) Definition of Done
+- Requested changes implemented.
+- Full local CI-equivalent suite passes.
+- Docs updated when behavior/surface changed.
+- Commit and push completed.

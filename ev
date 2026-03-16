@@ -1,0 +1,339 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_NAME="$(basename "$ROOT_DIR" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//')"
+REPO_NAME="${REPO_NAME:-evpoly}"
+DEFAULT_SESSION="${REPO_NAME}-live"
+SESSION_NAME="${EV_SESSION_NAME:-$DEFAULT_SESSION}"
+BIN_NAME="${EV_BIN_NAME:-polymarket-arbitrage-bot}"
+CONFIG_FILE="${EV_CONFIG:-config.json}"
+DISK_GUARD_ENABLE="${EV_DISK_GUARD_ENABLE:-1}"
+DISK_GUARD_MIN_FREE_GB="${EV_DISK_GUARD_MIN_FREE_GB:-5}"
+DISK_AUTO_PRUNE_ENABLE="${EV_DISK_AUTO_PRUNE_ENABLE:-1}"
+DISK_AUTO_PRUNE_CROSS_REPOS="${EV_DISK_AUTO_PRUNE_CROSS_REPOS:-1}"
+DISK_AUTO_PRUNE_DEPLOY_TARGET="${EV_DISK_AUTO_PRUNE_DEPLOY_TARGET:-1}"
+RETENTION_SCRIPT="${EV_RETENTION_SCRIPT:-$ROOT_DIR/scripts/evpoly_retention_cleanup.sh}"
+WALLET_SYNC_AUTOSTART="${EV_WALLET_SYNC_AUTOSTART:-1}"
+WALLET_SYNC_WORKER_SCRIPT="${EV_WALLET_SYNC_WORKER_SCRIPT:-$ROOT_DIR/scripts/wallet_sync_worker.sh}"
+FORCE_REBUILD="${EV_FORCE_REBUILD:-0}"
+FAST_START="${EV_FAST_START:-0}"
+
+usage() {
+  cat <<EOF
+Usage:
+  ./ev start [live|dry]
+  ./ev restart [live|dry]
+  ./ev stop
+  ./ev status
+  ./ev logs [lines]
+  ./ev cleanup [--dry-run]
+
+Defaults:
+  session: $SESSION_NAME
+  mode: live
+
+Env overrides:
+  EV_SESSION_NAME, EV_BIN_NAME, EV_CONFIG
+  EV_FORCE_REBUILD (1/0)
+  EV_FAST_START (1/0)  # skips heavy startup recoveries for faster boot
+  EV_DISK_GUARD_ENABLE (1/0), EV_DISK_GUARD_MIN_FREE_GB
+  EV_DISK_AUTO_PRUNE_ENABLE (1/0)
+  EV_DISK_AUTO_PRUNE_CROSS_REPOS (1/0)
+  EV_DISK_AUTO_PRUNE_DEPLOY_TARGET (1/0)
+  EV_RETENTION_SCRIPT
+  EV_WALLET_SYNC_AUTOSTART (1/0)
+  EV_WALLET_SYNC_WORKER_SCRIPT
+EOF
+}
+
+need_tmux() {
+  if ! command -v tmux >/dev/null 2>&1; then
+    echo "tmux is required but not installed." >&2
+    exit 1
+  fi
+}
+
+has_session() {
+  tmux has-session -t "$SESSION_NAME" 2>/dev/null
+}
+
+wallet_sync_should_manage() {
+  [[ "$WALLET_SYNC_AUTOSTART" != "0" ]]
+}
+
+wallet_sync_should_manage_for_mode() {
+  local mode="${1:-live}"
+  [[ "${mode,,}" == "live" ]] && wallet_sync_should_manage
+}
+
+wallet_sync_worker_exists() {
+  [[ -x "$WALLET_SYNC_WORKER_SCRIPT" ]]
+}
+
+wallet_sync_start() {
+  if ! wallet_sync_should_manage; then
+    return 0
+  fi
+  if ! wallet_sync_worker_exists; then
+    echo "wallet sync worker script not executable: $WALLET_SYNC_WORKER_SCRIPT" >&2
+    return 0
+  fi
+  "$WALLET_SYNC_WORKER_SCRIPT" start || true
+}
+
+wallet_sync_stop() {
+  if ! wallet_sync_should_manage; then
+    return 0
+  fi
+  if ! wallet_sync_worker_exists; then
+    return 0
+  fi
+  "$WALLET_SYNC_WORKER_SCRIPT" stop || true
+}
+
+wallet_sync_status() {
+  if ! wallet_sync_should_manage; then
+    echo "wallet sync worker: unmanaged (EV_WALLET_SYNC_AUTOSTART=0)"
+    return 0
+  fi
+  if ! wallet_sync_worker_exists; then
+    echo "wallet sync worker: script missing ($WALLET_SYNC_WORKER_SCRIPT)"
+    return 0
+  fi
+  "$WALLET_SYNC_WORKER_SCRIPT" status || true
+}
+
+disk_free_kb() {
+  df -Pk "$ROOT_DIR" | awk 'NR==2 {print $4}'
+}
+
+prune_path_if_exists() {
+  local path="${1:-}"
+  if [[ -z "$path" ]]; then
+    return 0
+  fi
+  if [[ -d "$path" ]]; then
+    echo "[disk-prune] removing: $path"
+    rm -rf -- "$path"
+  fi
+}
+
+disk_auto_prune() {
+  if [[ "${DISK_AUTO_PRUNE_ENABLE}" == "0" ]]; then
+    return 0
+  fi
+
+  if [[ -x "$RETENTION_SCRIPT" ]]; then
+    (cd "$ROOT_DIR" && "$RETENTION_SCRIPT") || true
+  fi
+
+  prune_path_if_exists "$ROOT_DIR/target/debug"
+
+  if [[ "${DISK_AUTO_PRUNE_CROSS_REPOS}" != "0" ]]; then
+    if [[ "$ROOT_DIR" != "/root/EVPOLY" ]]; then
+      prune_path_if_exists "/root/EVPOLY/target/debug"
+    fi
+    if [[ "$ROOT_DIR" != "/root/poly-remote" ]]; then
+      prune_path_if_exists "/root/poly-remote/target/debug"
+    fi
+  fi
+
+  if [[ "${DISK_AUTO_PRUNE_DEPLOY_TARGET}" != "0" ]]; then
+    prune_path_if_exists "/root/EVPOLY-deploy-target"
+  fi
+}
+
+disk_guard_check() {
+  if [[ "${DISK_GUARD_ENABLE}" == "0" ]]; then
+    return 0
+  fi
+  if ! [[ "${DISK_GUARD_MIN_FREE_GB}" =~ ^[0-9]+$ ]]; then
+    echo "invalid EV_DISK_GUARD_MIN_FREE_GB='${DISK_GUARD_MIN_FREE_GB}' (must be integer GB)" >&2
+    exit 1
+  fi
+  local free_kb required_kb
+  free_kb="$(disk_free_kb)"
+  required_kb=$(( DISK_GUARD_MIN_FREE_GB * 1024 * 1024 ))
+  if [[ -z "$free_kb" ]] || ! [[ "$free_kb" =~ ^[0-9]+$ ]]; then
+    echo "failed to read free disk space for '$ROOT_DIR'" >&2
+    exit 1
+  fi
+  if (( free_kb < required_kb )); then
+    local free_gb_before
+    free_gb_before="$(awk "BEGIN {printf \"%.2f\", $free_kb/1024/1024}")"
+    echo "disk guard: low space (${free_gb_before}G < ${DISK_GUARD_MIN_FREE_GB}G). Running auto-prune..." >&2
+    disk_auto_prune
+    free_kb="$(disk_free_kb)"
+  fi
+  if (( free_kb < required_kb )); then
+    local free_gb
+    free_gb="$(awk "BEGIN {printf \"%.2f\", $free_kb/1024/1024}")"
+    echo "disk guard failed: free ${free_gb}G < required ${DISK_GUARD_MIN_FREE_GB}G. Refusing to start." >&2
+    echo "Run: ./ev cleanup --dry-run  (or ./ev cleanup) before restart." >&2
+    exit 1
+  fi
+}
+
+mode_flag_from() {
+  local mode="${1:-live}"
+  case "${mode,,}" in
+    live) echo "--no-simulation" ;;
+    dry|sim|simulation|test) echo "--simulation" ;;
+    *)
+      echo "invalid mode: $mode (use live or dry)" >&2
+      exit 1
+      ;;
+  esac
+}
+
+release_bin_path() {
+  printf "%s/target/release/%s" "$ROOT_DIR" "$BIN_NAME"
+}
+
+binary_needs_rebuild() {
+  local bin_path
+  bin_path="$(release_bin_path)"
+  if [[ "$FORCE_REBUILD" == "1" ]]; then
+    return 0
+  fi
+  if [[ ! -x "$bin_path" ]]; then
+    return 0
+  fi
+  if [[ "$ROOT_DIR/Cargo.toml" -nt "$bin_path" ]]; then
+    return 0
+  fi
+  if [[ -f "$ROOT_DIR/Cargo.lock" && "$ROOT_DIR/Cargo.lock" -nt "$bin_path" ]]; then
+    return 0
+  fi
+  if [[ -f "$ROOT_DIR/build.rs" && "$ROOT_DIR/build.rs" -nt "$bin_path" ]]; then
+    return 0
+  fi
+  if find "$ROOT_DIR/src" "$ROOT_DIR/crates" "$ROOT_DIR/bin" \
+      -type f \( -name '*.rs' -o -name 'Cargo.toml' -o -name 'Cargo.lock' -o -name 'build.rs' \) \
+      -newer "$bin_path" -print -quit 2>/dev/null | grep -q .; then
+    return 0
+  fi
+  return 1
+}
+
+ensure_release_binary() {
+  local bin_path
+  bin_path="$(release_bin_path)"
+  if binary_needs_rebuild; then
+    echo "building release binary (code changed or missing binary)..."
+    (cd "$ROOT_DIR" && cargo build --release --bin "$BIN_NAME")
+  else
+    echo "using prebuilt binary: $bin_path"
+  fi
+}
+
+start_session() {
+  local mode="${1:-live}"
+  local mode_flag
+  if [[ -f "$ROOT_DIR/.env" ]]; then
+    # shellcheck disable=SC1091
+    source "$ROOT_DIR/.env" || true
+    DISK_GUARD_ENABLE="${EV_DISK_GUARD_ENABLE:-$DISK_GUARD_ENABLE}"
+    DISK_GUARD_MIN_FREE_GB="${EV_DISK_GUARD_MIN_FREE_GB:-$DISK_GUARD_MIN_FREE_GB}"
+    DISK_AUTO_PRUNE_ENABLE="${EV_DISK_AUTO_PRUNE_ENABLE:-$DISK_AUTO_PRUNE_ENABLE}"
+    DISK_AUTO_PRUNE_CROSS_REPOS="${EV_DISK_AUTO_PRUNE_CROSS_REPOS:-$DISK_AUTO_PRUNE_CROSS_REPOS}"
+    DISK_AUTO_PRUNE_DEPLOY_TARGET="${EV_DISK_AUTO_PRUNE_DEPLOY_TARGET:-$DISK_AUTO_PRUNE_DEPLOY_TARGET}"
+  fi
+  mode_flag="$(mode_flag_from "$mode")"
+  disk_guard_check
+  if has_session; then
+    echo "session '$SESSION_NAME' is already running."
+    return 0
+  fi
+  ensure_release_binary
+  local cmd
+  local fast_env_prefix=""
+  if [[ "$FAST_START" == "1" ]]; then
+    fast_env_prefix="export EVPOLY_STARTUP_CANCEL_ALL_ORDERS=false EVPOLY_STARTUP_PENDING_RECONCILE_ENABLE=false EVPOLY_MARKET_PREWARM_ENABLE=false; "
+  fi
+  cmd="cd '$ROOT_DIR' && set -a && { [ -f .env ] && source .env; true; } && set +a && ${fast_env_prefix}'$(release_bin_path)' --config '$CONFIG_FILE' $mode_flag"
+  tmux new-session -d -s "$SESSION_NAME" "bash -lc \"$cmd\""
+  echo "started session '$SESSION_NAME' ($mode)."
+  if wallet_sync_should_manage_for_mode "$mode"; then
+    wallet_sync_start
+  fi
+}
+
+cleanup_retention() {
+  if [[ ! -x "$RETENTION_SCRIPT" ]]; then
+    echo "retention script not found or not executable: $RETENTION_SCRIPT" >&2
+    exit 1
+  fi
+  (cd "$ROOT_DIR" && "$RETENTION_SCRIPT" "${1:-}")
+}
+
+stop_session() {
+  if has_session; then
+    tmux kill-session -t "$SESSION_NAME"
+    echo "stopped session '$SESSION_NAME'."
+  else
+    echo "session '$SESSION_NAME' is not running."
+  fi
+  wallet_sync_stop
+}
+
+status_session() {
+  if has_session; then
+    echo "session '$SESSION_NAME' is running."
+    tmux list-panes -t "$SESSION_NAME" -F "pane=#{pane_index} pid=#{pane_pid} cmd=#{pane_current_command}" | head -n 3
+  else
+    echo "session '$SESSION_NAME' is not running."
+  fi
+  wallet_sync_status
+}
+
+logs_session() {
+  local lines="${1:-200}"
+  if ! [[ "$lines" =~ ^[0-9]+$ ]]; then
+    echo "invalid lines value: $lines" >&2
+    exit 1
+  fi
+  if has_session; then
+    tmux capture-pane -pt "$SESSION_NAME" -S "-$lines"
+  else
+    echo "session '$SESSION_NAME' is not running."
+    exit 1
+  fi
+}
+
+main() {
+  need_tmux
+  local action="${1:-}"
+  case "$action" in
+    start)
+      start_session "${2:-live}"
+      ;;
+    restart)
+      stop_session
+      start_session "${2:-live}"
+      ;;
+    stop)
+      stop_session
+      ;;
+    status)
+      status_session
+      ;;
+    logs)
+      logs_session "${2:-200}"
+      ;;
+    cleanup)
+      cleanup_retention "${2:-}"
+      ;;
+    ""|-h|--help|help)
+      usage
+      ;;
+    *)
+      echo "unknown action: $action" >&2
+      usage
+      exit 1
+      ;;
+  esac
+}
+
+main "$@"
