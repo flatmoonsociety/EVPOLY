@@ -100,7 +100,7 @@ impl MaxBuyCurve {
 impl Default for MaxBuyCurve {
     fn default() -> Self {
         Self::from_csv(
-            "0:0.99,0.01:0.98,0.02:0.95,0.03:0.92,0.04:0.88,0.05:0.85,0.06:0.8,0.07:0.75,0.08:0.7,0.09:0.65,0.1:0.6",
+            "0:0.99,0.01:0.98,0.02:0.96,0.03:0.94,0.04:0.92,0.05:0.9,0.06:0.88,0.07:0.85,0.08:0.84,0.09:0.83,0.1:0.82,0.11:0.8,0.12:0.8,0.13:0.75,0.14:0.72,0.15:0.7",
         )
         .unwrap_or_else(|| Self {
             points: vec![CurvePoint {
@@ -147,7 +147,7 @@ impl EvcurveExecutionConfig {
             "EVPOLY_EVCURVE_TIMEFRAMES",
             &[Timeframe::M15, Timeframe::H1, Timeframe::H4, Timeframe::D1],
         );
-        let d1_enable = env_bool("EVPOLY_EVCURVE_D1_ENABLE", false);
+        let d1_enable = env_bool("EVPOLY_EVCURVE_D1_ENABLE", true);
         if d1_enable && !timeframes.contains(&Timeframe::D1) {
             timeframes.push(Timeframe::D1);
         }
@@ -167,7 +167,12 @@ impl EvcurveExecutionConfig {
             .collect::<HashMap<_, _>>();
         let m15_t2_max_buy_curve = std::env::var("EVPOLY_EVCURVE_15M_T2_MAXBUY_CURVE")
             .ok()
-            .and_then(|v| MaxBuyCurve::from_csv(v.as_str()));
+            .and_then(|v| MaxBuyCurve::from_csv(v.as_str()))
+            .or_else(|| {
+                MaxBuyCurve::from_csv(
+                    "0:0.99,0.01:0.98,0.02:0.96,0.03:0.94,0.04:0.92,0.05:0.9,0.06:0.88,0.07:0.85,0.08:0.75,0.09:0.72,0.1:0.69,0.11:0.67,0.12:0.65,0.13:0.64,0.14:0.63,0.15:0.62",
+                )
+            });
         let base_size_usd = size_policy::base_size_usd_from_env("EVPOLY_EVCURVE_BASE_SIZE_USD");
 
         let mut per_market_caps = HashMap::new();
@@ -188,7 +193,7 @@ impl EvcurveExecutionConfig {
             }
         }
 
-        let max_flip_prob = env_f64("EVPOLY_EVCURVE_MAX_FLIP_PROB", 0.10).clamp(0.0, 1.0);
+        let max_flip_prob = env_f64("EVPOLY_EVCURVE_MAX_FLIP_PROB", 0.15).clamp(0.0, 1.0);
         let min_buy_price = env_f64("EVPOLY_EVCURVE_MIN_BUY_PRICE", 0.60).clamp(0.0, 1.0);
 
         Self {
@@ -199,14 +204,14 @@ impl EvcurveExecutionConfig {
             timeframes,
             max_buy_curve: curve,
             per_symbol_max_buy_curve,
-            m15_t2_no_fak_fallback: env_bool("EVPOLY_EVCURVE_15M_T2_NO_FAK", false),
+            m15_t2_no_fak_fallback: env_bool("EVPOLY_EVCURVE_15M_T2_NO_FAK", true),
             m15_t2_max_buy_curve,
             min_samples: env_u64("EVPOLY_EVCURVE_MIN_SAMPLES", 100) as u32,
             max_flip_prob,
             min_buy_price,
             base_anchor_grace_sec: env_i64("EVPOLY_EVCURVE_BASE_ANCHOR_GRACE_SEC", 2).max(0),
             tick_jitter_sec: env_i64("EVPOLY_EVCURVE_TICK_JITTER_SEC", 1).max(0),
-            max_late_ms: env_i64("EVPOLY_EVCURVE_MAX_LATE_MS", 2_000).max(0),
+            max_late_ms: env_i64("EVPOLY_EVCURVE_MAX_LATE_MS", 60_000).max(0),
             proxy_stale_ms: env_i64("EVPOLY_EVCURVE_PROXY_STALE_MS", 1_000).max(100),
             pm_quote_fresh_ms: env_i64("EVPOLY_EVCURVE_PM_QUOTE_FRESH_MS", 1_500).max(100),
             pm_quote_pair_max_skew_ms: env_i64("EVPOLY_EVCURVE_PM_QUOTE_PAIR_SKEW_MS", 800).max(0),
@@ -214,7 +219,7 @@ impl EvcurveExecutionConfig {
             d1_strategy_cap_usd: env_f64("EVPOLY_EVCURVE_D1_STRATEGY_CAP_USD", 10_000.0).max(1.0),
             d1_zero_min_n: env_u64("EVPOLY_EVCURVE_D1_ZERO_MIN_N", 10) as u32,
             d1_ev_min_n: env_u64("EVPOLY_EVCURVE_D1_EV_MIN_N", 150) as u32,
-            d1_ev_gap: env_f64("EVPOLY_EVCURVE_D1_EV_GAP", 0.15).clamp(0.0, 1.0),
+            d1_ev_gap: env_f64("EVPOLY_EVCURVE_D1_EV_GAP", 0.08).clamp(0.0, 1.0),
             base_size_usd,
             per_market_caps,
         }

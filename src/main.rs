@@ -5945,7 +5945,7 @@ async fn main() -> Result<()> {
             let near_base_skip_bps_for_evcurve = near_base_skip_bps;
             let proxy_base_exact_max_delay_ms_for_evcurve = proxy_base_exact_max_delay_ms;
             let evcurve_chase_stop_on_first_fill =
-                env_bool_named("EVPOLY_EVCURVE_CHASE_STOP_ON_FIRST_FILL", true);
+                env_bool_named("EVPOLY_EVCURVE_CHASE_STOP_ON_FIRST_FILL", false);
             let evcurve_chase_ladder_enable =
                 env_bool_named("EVPOLY_EVCURVE_CHASE_LADDER_ENABLE", true);
             let evcurve_chase_ladder_rungs = std::env::var("EVPOLY_EVCURVE_CHASE_LADDER_RUNGS")
