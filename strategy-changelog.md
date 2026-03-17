@@ -67,6 +67,19 @@ Older entries may reference env keys that were removed in later commits.
 
 ## Change Log
 
+### 2026-03-17
+
+- `mm_rewards_v1` added CBB priority market path for MM auto-selection and execution policy (`src/main.rs`, `src/mm/mod.rs`, `src/mm/reward_scanner.rs`, `src/bin/alpha_service.rs`, `.env.example`, `.env.full.example`, `docs/mm_rewards_v1.md`):
+  - auto candidate payloads and in-memory candidates now carry `is_cbb` metadata, and MM auto refresh injects top CBB candidates into active selection when enabled.
+  - new MM env knobs:
+    - `EVPOLY_MM_CBB_PRIORITY_ENABLE`
+    - `EVPOLY_MM_CBB_PRIORITY_MAX_MARKETS`
+    - `EVPOLY_MM_CBB_PRIORITY_MIN_REWARD_RATE_HINT`
+    - `EVPOLY_MM_CBB_PRIORITY_BYPASS_FILTERS`
+    - `EVPOLY_MM_CBB_PRIORITY_MIN_REST_MS`
+  - when CBB priority is enabled and candidate is in CBB priority scope, MM bypasses soft filter gates (market blacklist, exit-mode reward/near-expiry soft gate, max reward min-size cap, competition allowlist/high-freeze), while keeping core reward eligibility/scoring/risk pipeline intact.
+  - CBB priority path now enforces a per-market minimum cancel/reprice rest floor via `EVPOLY_MM_CBB_PRIORITY_MIN_REST_MS` (intended for 3.5s book-rest constraints).
+
 ### 2026-03-16
 
 - `mm_rewards_v1` weak-exit stale balance fallback is now hard-disabled in runtime (`src/mm/mod.rs`):

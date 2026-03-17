@@ -487,6 +487,8 @@ struct MmRewardsSelectionRequest {
 struct MmRewardsSelectionCandidateInput {
     condition_id: String,
     slug: String,
+    #[serde(default)]
+    is_cbb: bool,
     reward_daily_rate: f64,
     #[serde(default)]
     reward_midpoint: Option<f64>,
@@ -1932,6 +1934,7 @@ fn mm_selection_candidate_to_auto_candidate(
         symbol: "MM".to_string(),
         timeframe: Timeframe::D1,
         timeframe_inferred: false,
+        is_cbb: input.is_cbb,
         reward_snapshot: mm::reward_scanner::MarketRewardSnapshot {
             reward_daily_rate: input.reward_daily_rate.max(0.0),
             midpoint: input.reward_midpoint,

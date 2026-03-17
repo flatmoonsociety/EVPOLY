@@ -21,6 +21,7 @@ Notes:
 - MM preflight is local runtime logic (not remote).
 - MM discovery is local runtime path.
 - `EVPOLY_MM_MARKET_MODE` default is `auto`; `hybrid` adds target-selector path on top of auto selection.
+- Optional CBB priority path can force CBB markets into selection and apply CBB-specific filter/rest settings.
 
 ## End-to-End Flow
 1. Refresh rewards universe and enrich market metadata locally.
@@ -48,5 +49,10 @@ Notes:
 - `EVPOLY_MM_AUTO_REFRESH_SEC`
 - `EVPOLY_MM_AUTO_SCAN_LIMIT`
 - `EVPOLY_MM_AUTO_RANK_BUDGET_USD`
+- `EVPOLY_MM_CBB_PRIORITY_ENABLE`
+- `EVPOLY_MM_CBB_PRIORITY_MAX_MARKETS`
+- `EVPOLY_MM_CBB_PRIORITY_MIN_REWARD_RATE_HINT`
+- `EVPOLY_MM_CBB_PRIORITY_BYPASS_FILTERS`
+- `EVPOLY_MM_CBB_PRIORITY_MIN_REST_MS`
 - `EVPOLY_REMOTE_MM_REWARDS_SELECTION_ALPHA_URL`
 - `EVPOLY_REMOTE_MM_REWARDS_ALPHA_TOKEN`
