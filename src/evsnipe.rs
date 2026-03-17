@@ -190,7 +190,10 @@ impl EvsnipeConfig {
     pub fn from_env() -> Self {
         Self {
             enable: env_bool("EVPOLY_STRATEGY_EVSNIPE_ENABLE", true),
-            symbols: parse_symbols_env("EVPOLY_EVSNIPE_SYMBOLS", &["BTC", "ETH", "SOL", "XRP"]),
+            symbols: parse_symbols_env(
+                "EVPOLY_EVSNIPE_SYMBOLS",
+                &["BTC", "ETH", "SOL", "XRP", "DOGE", "BNB", "HYPE"],
+            ),
             discovery_refresh_sec: env_u64("EVPOLY_EVSNIPE_DISCOVERY_REFRESH_SEC", 30).max(5),
             discovery_limit: env_u32("EVPOLY_EVSNIPE_DISCOVERY_LIMIT", 2_500).max(500),
             max_days_to_expiry: env_u64("EVPOLY_EVSNIPE_MAX_DAYS_TO_EXPIRY", 30)
@@ -584,7 +587,33 @@ pub fn parse_symbols_env(key: &str, default: &[&str]) -> Vec<String> {
 pub fn normalize_symbol(symbol: &str) -> String {
     match symbol.trim().to_ascii_uppercase().as_str() {
         "SOLANA" => "SOL".to_string(),
+        "DOGECOIN" => "DOGE".to_string(),
+        "HYPERLIQUID" => "HYPE".to_string(),
         other => other.to_string(),
+    }
+}
+
+fn binance_ticker_price_url(symbol: &str) -> &'static str {
+    match symbol {
+        // HYPE is quoted on Binance USD-M futures (not spot ticker endpoint).
+        "HYPE" => "https://fapi.binance.com/fapi/v1/ticker/price",
+        _ => "https://api.binance.com/api/v3/ticker/price",
+    }
+}
+
+fn binance_trade_stream_url(symbol: &str) -> String {
+    let pair = format!("{}usdt@trade", symbol.to_ascii_lowercase());
+    match symbol {
+        "HYPE" => format!("wss://fstream.binance.com/ws/{}", pair),
+        _ => format!("wss://stream.binance.com:9443/ws/{}", pair),
+    }
+}
+
+fn binance_kline_close_stream_url(symbol: &str) -> String {
+    let pair = format!("{}usdt@kline_1m", symbol.to_ascii_lowercase());
+    match symbol {
+        "HYPE" => format!("wss://fstream.binance.com/ws/{}", pair),
+        _ => format!("wss://stream.binance.com:9443/ws/{}", pair),
     }
 }
 
@@ -709,23 +738,54 @@ pub async fn fetch_binance_spot_prices(symbols: &[String]) -> Result<HashMap<Str
             continue;
         }
         let pair = format!("{}USDT", symbol_norm);
-        let response = client
-            .get("https://api.binance.com/api/v3/ticker/price")
+        let url = binance_ticker_price_url(symbol_norm.as_str());
+        let response = match client
+            .get(url)
             .query(&[("symbol", pair.as_str())])
             .send()
             .await
-            .with_context(|| format!("fetch binance spot price {}", pair))?;
+        {
+            Ok(resp) => resp,
+            Err(err) => {
+                warn!("EVSnipe ticker fetch failed for {} via {}: {}", pair, url, err);
+                continue;
+            }
+        };
         let status = response.status();
-        let body = response.text().await.context("read binance spot body")?;
+        let body = match response.text().await {
+            Ok(text) => text,
+            Err(err) => {
+                warn!("EVSnipe ticker read failed for {} via {}: {}", pair, url, err);
+                continue;
+            }
+        };
         if !status.is_success() {
-            anyhow::bail!("binance spot status {} for {}: {}", status, pair, body);
+            warn!(
+                "EVSnipe ticker status {} for {} via {}: {}",
+                status, pair, url, body
+            );
+            continue;
         }
-        let message: BinanceTickerPriceMsg =
-            serde_json::from_str(&body).with_context(|| format!("parse binance spot {}", pair))?;
-        let price =
-            message.price.trim().parse::<f64>().with_context(|| {
-                format!("invalid binance spot price {}={}", pair, message.price)
-            })?;
+        let message: BinanceTickerPriceMsg = match serde_json::from_str(&body) {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                warn!(
+                    "EVSnipe ticker parse failed for {} via {}: {} (body={})",
+                    pair, url, err, body
+                );
+                continue;
+            }
+        };
+        let price = match message.price.trim().parse::<f64>() {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                warn!(
+                    "EVSnipe ticker invalid price for {} via {}: {} (raw={})",
+                    pair, url, err, message.price
+                );
+                continue;
+            }
+        };
         if price.is_finite() && price > 0.0 {
             out.insert(symbol_norm, price);
         }
@@ -998,6 +1058,54 @@ fn detect_symbol(market: &Market) -> Option<String> {
     {
         return Some("XRP".to_string());
     }
+    if starts_with_any(
+        question.as_str(),
+        &[
+            "will dogecoin ",
+            "will doge ",
+            "dogecoin ",
+            "doge ",
+            "does dogecoin ",
+            "does doge ",
+        ],
+    ) || starts_with_any(
+        slug.as_str(),
+        &["will-dogecoin-", "will-doge-", "dogecoin-", "doge-"],
+    ) {
+        return Some("DOGE".to_string());
+    }
+    if starts_with_any(
+        question.as_str(),
+        &[
+            "will bnb ",
+            "bnb ",
+            "does bnb ",
+            "will binance coin ",
+            "binance coin ",
+            "does binance coin ",
+        ],
+    ) || starts_with_any(
+        slug.as_str(),
+        &["will-bnb-", "bnb-", "will-binance-coin-", "binance-coin-"],
+    ) {
+        return Some("BNB".to_string());
+    }
+    if starts_with_any(
+        question.as_str(),
+        &[
+            "will hype ",
+            "hype ",
+            "does hype ",
+            "will hyperliquid ",
+            "hyperliquid ",
+            "does hyperliquid ",
+        ],
+    ) || starts_with_any(
+        slug.as_str(),
+        &["will-hype-", "hype-", "will-hyperliquid-", "hyperliquid-"],
+    ) {
+        return Some("HYPE".to_string());
+    }
     let description = market
         .description
         .as_deref()
@@ -1014,6 +1122,15 @@ fn detect_symbol(market: &Market) -> Option<String> {
     }
     if description.contains("xrpusdt") || description.contains("xrp/usdt") {
         return Some("XRP".to_string());
+    }
+    if description.contains("dogeusdt") || description.contains("doge/usdt") {
+        return Some("DOGE".to_string());
+    }
+    if description.contains("bnbusdt") || description.contains("bnb/usdt") {
+        return Some("BNB".to_string());
+    }
+    if description.contains("hypeusdt") || description.contains("hype/usdt") {
+        return Some("HYPE".to_string());
     }
     None
 }
@@ -1069,6 +1186,9 @@ fn is_supported_binance_price_market(market: &Market, symbol: &str) -> bool {
         "ETH" => &["ethusdt", "eth/usdt"],
         "SOL" => &["solusdt", "sol/usdt"],
         "XRP" => &["xrpusdt", "xrp/usdt"],
+        "DOGE" => &["dogeusdt", "doge/usdt"],
+        "BNB" => &["bnbusdt", "bnb/usdt"],
+        "HYPE" => &["hypeusdt", "hype/usdt"],
         _ => &[],
     };
     if pair_tokens.is_empty() {
@@ -1333,10 +1453,7 @@ fn spawn_single_symbol_trade_stream(
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let send_timeout_ms = env_u64("EVPOLY_EVSNIPE_TICK_SEND_TIMEOUT_MS", 60).clamp(5, 500);
-        let stream = format!(
-            "wss://stream.binance.com:9443/ws/{}usdt@trade",
-            symbol.to_ascii_lowercase()
-        );
+        let stream = binance_trade_stream_url(symbol.as_str());
         let mut backoff_sec: u64 = 1;
         let mut dropped_events: u64 = 0;
         loop {
@@ -1434,10 +1551,7 @@ fn spawn_single_symbol_kline_close_stream(
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let send_timeout_ms = env_u64("EVPOLY_EVSNIPE_KLINE_SEND_TIMEOUT_MS", 90).clamp(5, 500);
-        let stream = format!(
-            "wss://stream.binance.com:9443/ws/{}usdt@kline_1m",
-            symbol.to_ascii_lowercase()
-        );
+        let stream = binance_kline_close_stream_url(symbol.as_str());
         let mut backoff_sec: u64 = 1;
         let mut dropped_events: u64 = 0;
         loop {
@@ -1816,5 +1930,37 @@ mod tests {
         };
         assert_eq!(spec.close_condition_yes(1550.0), Some(true));
         assert_eq!(spec.close_condition_yes(1650.0), Some(false));
+    }
+
+    #[test]
+    fn detect_symbol_supports_doge_bnb_hype() {
+        let mut market = Market {
+            condition_id: "cond-new".to_string(),
+            market_id: None,
+            question: "Will Dogecoin hit $1?".to_string(),
+            slug: "will-dogecoin-hit-1".to_string(),
+            description: Some("Binance 1 minute candle DOGE/USDT High".to_string()),
+            resolution_source: None,
+            end_date: None,
+            end_date_iso: None,
+            end_date_iso_alt: None,
+            active: true,
+            closed: false,
+            tokens: None,
+            clob_token_ids: None,
+            outcomes: None,
+            competitive: None,
+        };
+        assert_eq!(detect_symbol(&market).as_deref(), Some("DOGE"));
+
+        market.question = "Will BNB close above $700?".to_string();
+        market.slug = "will-bnb-close-above-700".to_string();
+        market.description = Some("Binance 1 minute candle BNB/USDT Close".to_string());
+        assert_eq!(detect_symbol(&market).as_deref(), Some("BNB"));
+
+        market.question = "Will Hyperliquid close above $50?".to_string();
+        market.slug = "will-hyperliquid-close-above-50".to_string();
+        market.description = Some("Binance 1 minute candle HYPE/USDT Close".to_string());
+        assert_eq!(detect_symbol(&market).as_deref(), Some("HYPE"));
     }
 }

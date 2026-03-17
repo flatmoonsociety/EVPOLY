@@ -822,7 +822,7 @@ fn setting_specs() -> Vec<BotSettingSpec> {
             group: "strategy",
             strategy: Some("evsnipe"),
             value_type: BotSettingType::String,
-            default_raw: "BTC,ETH,SOL,XRP",
+            default_raw: "BTC,ETH,SOL,XRP,DOGE,BNB,HYPE",
             min: None,
             max: None,
             enum_values: &[],
