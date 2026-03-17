@@ -122,6 +122,11 @@ Older entries may reference env keys that were removed in later commits.
 
 ### 2026-03-17
 
+- Shared size policy symbol multiplier defaults expanded to include `DOGE/BNB/HYPE` at `0.5` (`src/size_policy.rs`, `.env.full.example`):
+  - `symbol_size_multiplier(...)` now returns `0.5` for `DOGE`, `BNB`, and `HYPE` (same as `SOL/XRP`), instead of falling back to `1.0`.
+  - affects default notional sizing in strategies that use shared base-size policy (`premarket_v1`, `endgame_sweep_v1`, `evcurve_v1`, `sessionband_v1`) when those symbols are enabled.
+  - added unit-test coverage for `DOGE/BNB/HYPE` multiplier behavior.
+
 - Strategy default symbol universe expanded to full 7-symbol set for endgame/evcurve/evsnipe (`src/config.rs`, `src/evcurve.rs`, `src/bot_admin.rs`, `.env.full.example`, `.env`):
   - `endgame_sweep_v1` env/code fallback default now uses `BTC,ETH,SOL,XRP,DOGE,BNB,HYPE` when `EVPOLY_ENDGAME_SYMBOLS` is unset.
   - `evcurve_v1` env/code fallback default now uses `BTC,ETH,SOL,XRP,DOGE,BNB,HYPE` when `EVPOLY_EVCURVE_SYMBOLS` is unset.

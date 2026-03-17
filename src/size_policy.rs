@@ -14,7 +14,7 @@ pub fn symbol_size_multiplier(symbol: &str) -> f64 {
     match normalize_symbol(symbol).as_str() {
         "BTC" => 1.0,
         "ETH" => 0.8,
-        "SOL" | "XRP" => 0.5,
+        "SOL" | "XRP" | "DOGE" | "BNB" | "HYPE" => 0.5,
         _ => 1.0,
     }
 }
@@ -83,6 +83,9 @@ mod tests {
         assert_eq!(symbol_size_multiplier("SOL"), 0.5);
         assert_eq!(symbol_size_multiplier("SOLANA"), 0.5);
         assert_eq!(symbol_size_multiplier("XRP"), 0.5);
+        assert_eq!(symbol_size_multiplier("DOGE"), 0.5);
+        assert_eq!(symbol_size_multiplier("BNB"), 0.5);
+        assert_eq!(symbol_size_multiplier("HYPE"), 0.5);
     }
 
     #[test]
