@@ -209,7 +209,7 @@ impl EndgameExecutionConfig {
         let enabled_timeframes_csv = env_nonempty(&["EVPOLY_ENDGAME_TIMEFRAMES".to_string()])
             .unwrap_or_else(|| "5m,15m,1h,4h".to_string());
         let enabled_symbols_csv = env_nonempty(&["EVPOLY_ENDGAME_SYMBOLS".to_string()])
-            .unwrap_or_else(|| "BTC,ETH,SOL,XRP".to_string());
+            .unwrap_or_else(|| "BTC,ETH,SOL,XRP,DOGE,BNB,HYPE".to_string());
         let per_tick_notional_by_offset =
             env_nonempty(&["EVPOLY_ENDGAME_PER_TICK_USD_BY_OFFSET".to_string()])
                 .map(|raw| parse_endgame_tick_notionals_by_offset(raw.as_str(), offset_scale_ms))

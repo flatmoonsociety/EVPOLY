@@ -142,7 +142,10 @@ pub struct EvcurveExecutionConfig {
 
 impl EvcurveExecutionConfig {
     pub fn from_env() -> Self {
-        let symbols = parse_symbols_env("EVPOLY_EVCURVE_SYMBOLS", &["BTC", "ETH", "SOL", "XRP"]);
+        let symbols = parse_symbols_env(
+            "EVPOLY_EVCURVE_SYMBOLS",
+            &["BTC", "ETH", "SOL", "XRP", "DOGE", "BNB", "HYPE"],
+        );
         let mut timeframes = parse_timeframes_env(
             "EVPOLY_EVCURVE_TIMEFRAMES",
             &[Timeframe::M15, Timeframe::H1, Timeframe::H4, Timeframe::D1],

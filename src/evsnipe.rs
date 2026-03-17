@@ -747,7 +747,10 @@ pub async fn fetch_binance_spot_prices(symbols: &[String]) -> Result<HashMap<Str
         {
             Ok(resp) => resp,
             Err(err) => {
-                warn!("EVSnipe ticker fetch failed for {} via {}: {}", pair, url, err);
+                warn!(
+                    "EVSnipe ticker fetch failed for {} via {}: {}",
+                    pair, url, err
+                );
                 continue;
             }
         };
@@ -755,7 +758,10 @@ pub async fn fetch_binance_spot_prices(symbols: &[String]) -> Result<HashMap<Str
         let body = match response.text().await {
             Ok(text) => text,
             Err(err) => {
-                warn!("EVSnipe ticker read failed for {} via {}: {}", pair, url, err);
+                warn!(
+                    "EVSnipe ticker read failed for {} via {}: {}",
+                    pair, url, err
+                );
                 continue;
             }
         };

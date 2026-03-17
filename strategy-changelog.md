@@ -122,6 +122,11 @@ Older entries may reference env keys that were removed in later commits.
 
 ### 2026-03-17
 
+- Strategy default symbol universe expanded to full 7-symbol set for endgame/evcurve/evsnipe (`src/config.rs`, `src/evcurve.rs`, `src/bot_admin.rs`, `.env.full.example`, `.env`):
+  - `endgame_sweep_v1` env/code fallback default now uses `BTC,ETH,SOL,XRP,DOGE,BNB,HYPE` when `EVPOLY_ENDGAME_SYMBOLS` is unset.
+  - `evcurve_v1` env/code fallback default now uses `BTC,ETH,SOL,XRP,DOGE,BNB,HYPE` when `EVPOLY_EVCURVE_SYMBOLS` is unset.
+  - `evsnipe_v1` templates/runtime env defaults are aligned to explicit `BTC,ETH,SOL,XRP,DOGE,BNB,HYPE` (`EVPOLY_EVSNIPE_SYMBOLS`).
+  - affects symbol fanout defaults across configured timeframes for these three strategy paths.
 - `mm_rewards_v1` now enforces reward minimum share size on SELL/exit order paths when reward-min enforcement is enabled and the market side is reward-eligible (`src/main.rs`):
   - weak-exit sell replacement and inventory-reduction sell paths now compute `min_exit_shares` as `max(exchange_min_shares, reward_min_shares_with_policy)` instead of exchange floor only.
   - this keeps MM-reward exit quotes at reward-qualifying share size (including inventory unwind/rebalance ladders), avoiding sub-min-size SELL quotes that forfeit rewards.
