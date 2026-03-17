@@ -69,6 +69,11 @@ Older entries may reference env keys that were removed in later commits.
 
 ### 2026-03-17
 
+- `mm_rewards_v1` CBB reprice-rest enforcement now applies to CBB inventory-janitor paths as well (`src/main.rs`):
+  - buy-side ladder reprice cooldown now uses `EVPOLY_MM_CBB_PRIORITY_MIN_REST_MS` for any CBB market when CBB priority is enabled, including forced inventory/janitor-scoped CBB markets.
+  - this removes the previous scope gap where some CBB markets were treated as non-priority in reprice cadence and could churn cancel/replace at normal rest intervals.
+  - added `cbb_reprice_scope` telemetry in `mm_rewards_ladder_reprice_cancel` event payload for runtime verification.
+
 - `mm_rewards_v1` now supports enforced CBB-only execution scope via `EVPOLY_MM_CBB_ONLY_ENABLE` (`src/mm/mod.rs`, `src/main.rs`):
   - MM auto candidate set is filtered to `is_cbb=true` before remote selection.
   - runtime work-item loop now hard-skips non-CBB markets (including inventory-janitor sourced items), preventing quote/replace activity outside CBB when enabled.
