@@ -380,6 +380,7 @@ pub struct MmRewardsConfig {
     pub competition_high_freeze_enable: bool,
     pub competition_level_allowlist: Vec<String>,
     pub cbb_priority_enable: bool,
+    pub cbb_only_enable: bool,
     pub cbb_priority_max_markets: usize,
     pub cbb_priority_min_reward_rate_hint: f64,
     pub cbb_priority_bypass_filters: bool,
@@ -767,6 +768,7 @@ impl MmRewardsConfig {
                 "EVPOLY_MM_COMPETITION_LEVEL_ALLOWLIST",
             ),
             cbb_priority_enable: env_bool("EVPOLY_MM_CBB_PRIORITY_ENABLE", false),
+            cbb_only_enable: env_bool("EVPOLY_MM_CBB_ONLY_ENABLE", false),
             cbb_priority_max_markets: env_usize("EVPOLY_MM_CBB_PRIORITY_MAX_MARKETS", 13)
                 .clamp(1, 256),
             cbb_priority_min_reward_rate_hint: env_f64(

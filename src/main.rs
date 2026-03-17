@@ -13319,7 +13319,7 @@ async fn main() -> Result<()> {
                                         .saturating_mul(1_000);
                                 let mut cooldown_skipped = 0usize;
                                 let mut forced_offboard_skipped = 0usize;
-                                let eligible_ranked = ranked
+                                let mut eligible_ranked = ranked
                                     .into_iter()
                                     .filter(|candidate| {
                                         let on_cooldown = mm_auto_reject_until_ms_by_condition
@@ -13343,6 +13343,23 @@ async fn main() -> Result<()> {
                                         }
                                     })
                                     .collect::<Vec<_>>();
+                                if mm_cfg_for_loop.cbb_only_enable {
+                                    let eligible_before_cbb_only = eligible_ranked.len();
+                                    eligible_ranked.retain(|candidate| candidate.is_cbb);
+                                    let filtered_non_cbb = eligible_before_cbb_only
+                                        .saturating_sub(eligible_ranked.len());
+                                    if filtered_non_cbb > 0 {
+                                        log_event(
+                                            "mm_rewards_cbb_only_selection_filter",
+                                            json!({
+                                                "strategy_id": STRATEGY_ID_MM_REWARDS_V1,
+                                                "eligible_before": eligible_before_cbb_only,
+                                                "eligible_after": eligible_ranked.len(),
+                                                "filtered_non_cbb": filtered_non_cbb
+                                            }),
+                                        );
+                                    }
+                                }
                                 let selection_outcome = if enabled_modes.is_empty() {
                                     Ok(RemoteMmRewardsSelectionOutcome {
                                         selected_by_mode: std::collections::HashMap::new(),
@@ -14659,6 +14676,32 @@ async fn main() -> Result<()> {
                                     || slug.contains("ncaab")
                                     || slug.contains("march-madness")
                             });
+                        if mm_cfg_for_loop.cbb_only_enable && !is_cbb_market {
+                            let skip_key = format!("cbb_only_non_cbb:{}", market.condition_id);
+                            let should_emit = last_skip_emit_ms
+                                .get(skip_key.as_str())
+                                .map(|last| now_ms.saturating_sub(*last) >= 15_000)
+                                .unwrap_or(true);
+                            if should_emit {
+                                last_skip_emit_ms.insert(skip_key, now_ms);
+                                log_event(
+                                    "mm_rewards_cbb_only_skip_non_cbb",
+                                    json!({
+                                        "strategy_id": STRATEGY_ID_MM_REWARDS_V1,
+                                        "source": market_source,
+                                        "mode": mode.as_str(),
+                                        "condition_id": market.condition_id,
+                                        "slug": market.slug,
+                                        "symbol": target.symbol,
+                                        "timeframe": target.timeframe.as_str(),
+                                        "forced_inventory_scope": forced_inventory_scope,
+                                        "forced_reward_scope": forced_reward_scope
+                                    }),
+                                );
+                            }
+                            metrics.on_skip();
+                            continue;
+                        }
                         let is_cbb_priority_market = cbb_priority_scope && is_cbb_market;
                         let cbb_priority_bypass_filters = is_cbb_priority_market
                             && mm_cfg_for_loop.cbb_priority_enable
