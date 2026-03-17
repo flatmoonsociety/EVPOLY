@@ -69,6 +69,17 @@ Older entries may reference env keys that were removed in later commits.
 
 ### 2026-03-17
 
+- `mm_rewards_v1` added CBB hard-bypass execution lane so CBB markets can run without MM limiter gates even in mixed MM runtime (`src/main.rs`, `src/mm/mod.rs`, `.env`, `.env.example`, `.env.full.example`):
+  - new env knob `EVPOLY_MM_CBB_HARD_BYPASS_ENABLE` (default `true`) gates the hard-bypass behavior when CBB priority is enabled.
+  - CBB hard-bypass now skips limiter paths for auto-selection cooldown/force-offboard filtering, constraints cooldown holds, stale-pause/stale-feed pause gates, competition-freeze pause, preflight blocked-side skips, adverse-BBO cooldown, and conserve/prefill pressure clamps.
+  - preserved hard safety: `not_reward_eligible` auto reject remains active and is tracked via non-reward reject cooldown state so CBB bypass does not override that reject path.
+  - affects `mm_rewards_v1` CBB markets (CBB-only and mixed MM rewards runs) across active MM modes/timeframes; non-CBB behavior unchanged.
+
+- `mm_rewards_v1` CBB markets now bypass MM action-budget degrade modes and always run in `normal` action mode (`src/main.rs`):
+  - for CBB discovery scope, `conserve`/`survival` action transitions are skipped and CBB quote ladders no longer get action-mode truncation to reduced rung counts.
+  - non-CBB markets keep existing action-budget behavior (`normal`/`conserve`/`survival`) unchanged.
+  - affects CBB-only and mixed MM runtime when CBB markets are active.
+
 - `mm_rewards_v1` CBB reprice-rest enforcement now applies to CBB inventory-janitor paths as well (`src/main.rs`):
   - buy-side ladder reprice cooldown now uses `EVPOLY_MM_CBB_PRIORITY_MIN_REST_MS` for any CBB market when CBB priority is enabled, including forced inventory/janitor-scoped CBB markets.
   - this removes the previous scope gap where some CBB markets were treated as non-priority in reprice cadence and could churn cancel/replace at normal rest intervals.

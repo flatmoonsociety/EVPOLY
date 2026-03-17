@@ -12755,6 +12755,10 @@ async fn main() -> Result<()> {
                     String,
                     i64,
                 > = std::collections::HashMap::new();
+                let mut mm_non_reward_reject_until_ms_by_condition: std::collections::HashMap<
+                    String,
+                    i64,
+                > = std::collections::HashMap::new();
                 let mut mm_auto_force_offboard_until_ms_by_condition: std::collections::HashMap<
                     String,
                     i64,
@@ -13319,9 +13323,25 @@ async fn main() -> Result<()> {
                                         .saturating_mul(1_000);
                                 let mut cooldown_skipped = 0usize;
                                 let mut forced_offboard_skipped = 0usize;
+                                mm_non_reward_reject_until_ms_by_condition
+                                    .retain(|_, until_ms| now_ms < *until_ms);
+                                let cbb_hard_bypass_selection = mm_cfg_for_loop.cbb_priority_enable
+                                    && mm_cfg_for_loop.cbb_priority_bypass_filters
+                                    && mm_cfg_for_loop.cbb_hard_bypass_enable;
                                 let mut eligible_ranked = ranked
                                     .into_iter()
                                     .filter(|candidate| {
+                                        let non_reward_reject_active =
+                                            mm_non_reward_reject_until_ms_by_condition
+                                                .get(candidate.market.condition_id.as_str())
+                                                .map(|until_ms| now_ms < *until_ms)
+                                                .unwrap_or(false);
+                                        if cbb_hard_bypass_selection
+                                            && candidate.is_cbb
+                                            && !non_reward_reject_active
+                                        {
+                                            return true;
+                                        }
                                         let on_cooldown = mm_auto_reject_until_ms_by_condition
                                             .get(candidate.market.condition_id.as_str())
                                             .map(|until_ms| now_ms < *until_ms)
@@ -14708,6 +14728,10 @@ async fn main() -> Result<()> {
                         let cbb_priority_bypass_filters = is_cbb_priority_market
                             && mm_cfg_for_loop.cbb_priority_enable
                             && mm_cfg_for_loop.cbb_priority_bypass_filters;
+                        let cbb_hard_bypass = is_cbb_market
+                            && mm_cfg_for_loop.cbb_priority_enable
+                            && mm_cfg_for_loop.cbb_priority_bypass_filters
+                            && mm_cfg_for_loop.cbb_hard_bypass_enable;
 
                         if !processed_condition_ids.insert(market.condition_id.clone()) {
                             log_event(
@@ -15052,12 +15076,16 @@ async fn main() -> Result<()> {
                             })
                             .max()
                             .unwrap_or(0);
-                        let action_mode = mm_action_mode_from_stats(
-                            &mm_cfg_for_loop,
-                            actions_per_min,
-                            cancel_fill_ratio,
-                            max_stale_strikes_for_condition,
-                        );
+                        let action_mode = if is_cbb_market {
+                            MmActionMode::Normal
+                        } else {
+                            mm_action_mode_from_stats(
+                                &mm_cfg_for_loop,
+                                actions_per_min,
+                                cancel_fill_ratio,
+                                max_stale_strikes_for_condition,
+                            )
+                        };
                         let prev_action_mode = mm_action_mode_by_condition
                             .insert(market.condition_id.clone(), action_mode)
                             .unwrap_or(MmActionMode::Normal);
@@ -15434,6 +15462,8 @@ async fn main() -> Result<()> {
                                         now_ms.saturating_add(replacement_cooldown_ms);
                                     let prev_until_ms = mm_auto_reject_until_ms_by_condition
                                         .insert(market.condition_id.clone(), reject_until_ms);
+                                    mm_non_reward_reject_until_ms_by_condition
+                                        .insert(market.condition_id.clone(), reject_until_ms);
                                     mm_last_auto_refresh_ms = 0;
                                     log_event(
                                         "mm_rewards_auto_market_cooldown_set",
@@ -15770,32 +15800,38 @@ async fn main() -> Result<()> {
                             .copied()
                         {
                             if now_ms < retry_after_ms {
-                                let skip_key = format!(
-                                    "mm_rewards_constraints_retry_after:{}",
-                                    market.condition_id
-                                );
-                                let should_emit = last_skip_emit_ms
-                                    .get(skip_key.as_str())
-                                    .map(|last| now_ms.saturating_sub(*last) >= 10_000)
-                                    .unwrap_or(true);
-                                if should_emit {
-                                    last_skip_emit_ms.insert(skip_key, now_ms);
-                                    log_event(
-                                        "mm_rewards_skip_constraints_cooldown",
-                                        json!({
-                                            "strategy_id": STRATEGY_ID_MM_REWARDS_V1,
-                                            "mode": mode.as_str(),
-                                            "condition_id": market.condition_id,
-                                            "retry_after_ms": retry_after_ms,
-                                            "remaining_ms": retry_after_ms.saturating_sub(now_ms)
-                                        }),
+                                if cbb_hard_bypass {
+                                    mm_constraints_retry_after_ms_by_condition
+                                        .remove(market.condition_id.as_str());
+                                } else {
+                                    let skip_key = format!(
+                                        "mm_rewards_constraints_retry_after:{}",
+                                        market.condition_id
                                     );
+                                    let should_emit = last_skip_emit_ms
+                                        .get(skip_key.as_str())
+                                        .map(|last| now_ms.saturating_sub(*last) >= 10_000)
+                                        .unwrap_or(true);
+                                    if should_emit {
+                                        last_skip_emit_ms.insert(skip_key, now_ms);
+                                        log_event(
+                                            "mm_rewards_skip_constraints_cooldown",
+                                            json!({
+                                                "strategy_id": STRATEGY_ID_MM_REWARDS_V1,
+                                                "mode": mode.as_str(),
+                                                "condition_id": market.condition_id,
+                                                "retry_after_ms": retry_after_ms,
+                                                "remaining_ms": retry_after_ms.saturating_sub(now_ms)
+                                            }),
+                                        );
+                                    }
+                                    metrics.on_skip();
+                                    continue;
                                 }
-                                metrics.on_skip();
-                                continue;
+                            } else {
+                                mm_constraints_retry_after_ms_by_condition
+                                    .remove(market.condition_id.as_str());
                             }
-                            mm_constraints_retry_after_ms_by_condition
-                                .remove(market.condition_id.as_str());
                         }
 
                         let (up_orderbook_res, down_orderbook_res) = tokio::join!(
@@ -16238,10 +16274,14 @@ async fn main() -> Result<()> {
                             metrics.on_skip();
                             continue;
                         }
-                        let cooldown_active = mm_hit_cooldown_until_ms
-                            .get(market.condition_id.as_str())
-                            .map(|until| now_ms < *until)
-                            .unwrap_or(false);
+                        let cooldown_active = if cbb_hard_bypass {
+                            false
+                        } else {
+                            mm_hit_cooldown_until_ms
+                                .get(market.condition_id.as_str())
+                                .map(|until| now_ms < *until)
+                                .unwrap_or(false)
+                        };
 
                         let up_balance_live = tokio::time::timeout(
                             tokio::time::Duration::from_millis(900),
@@ -16737,7 +16777,7 @@ async fn main() -> Result<()> {
                                 }
                                 (None, false, "none", None, false)
                             };
-                        if competition_freeze_active {
+                        if competition_freeze_active && !cbb_hard_bypass {
                             mm_market_state = "paused".to_string();
                             mm_market_reason = Some("competition_high_freeze".to_string());
                             for token_id in [up_token_id.as_str(), down_token_id.as_str()] {
@@ -17320,8 +17360,9 @@ async fn main() -> Result<()> {
                         }
 
                         let conserve_active = conserve_state.active;
-                        let conserve_active_effective =
-                            conserve_active && mm_cfg_for_loop.conserve_actions_enable;
+                        let conserve_active_effective = conserve_active
+                            && mm_cfg_for_loop.conserve_actions_enable
+                            && !cbb_hard_bypass;
                         let conserve_severity = conserve_state.severity.clamp(1.0, 3.0);
                         let conserve_levels = if conserve_active_effective {
                             let min_levels = mm_cfg_for_loop
@@ -17374,7 +17415,8 @@ async fn main() -> Result<()> {
                             0
                         };
                         let risk_levels_cap = conserve_levels.min(action_levels_cap).max(1);
-                        let prefill_pressure_active = mm_cfg_for_loop.prefill_drift_enable
+                        let prefill_pressure_active = !cbb_hard_bypass
+                            && mm_cfg_for_loop.prefill_drift_enable
                             && markout_sample_count_1s >= mm_cfg_for_loop.prefill_drift_min_samples
                             && markout_ewma_pickoff_bps
                                 .map(|v| v <= mm_cfg_for_loop.prefill_drift_gate_bps)
@@ -17682,7 +17724,7 @@ async fn main() -> Result<()> {
                         }
                         let market_feed_stale = now_ms.saturating_sub(mm_last_market_event_ms)
                             > mm_cfg_for_loop.stale_market_event_ms;
-                        if market_feed_stale && !rebalance_only_market {
+                        if market_feed_stale && !rebalance_only_market && !cbb_hard_bypass {
                             mm_market_state = "paused".to_string();
                             for cancel_token_id in [up_token_id.as_str(), down_token_id.as_str()] {
                                 for cancel_side in ["BUY", "SELL"] {
@@ -18606,7 +18648,7 @@ async fn main() -> Result<()> {
                                 mm_stale_paused_scopes.contains(stale_scope_key.as_str());
                             let stale_hold_active =
                                 mm_stale_hold_scopes.contains(stale_scope_key.as_str());
-                            if stale_pause_active || stale_hold_active {
+                            if (stale_pause_active || stale_hold_active) && !cbb_hard_bypass {
                                 mm_dominant_state =
                                     mm_dominant_state.pick_higher(MmDominantState::StalePause);
                                 mm_market_state = "paused".to_string();
@@ -19417,7 +19459,7 @@ async fn main() -> Result<()> {
                             if let Some(curr) = side_best_bid {
                                 mm_prev_best_bid_by_token.insert(token_id.to_string(), curr);
                             }
-                            if adverse_bbo_hit {
+                            if adverse_bbo_hit && !cbb_hard_bypass {
                                 mm_market_state = "cooldown".to_string();
                                 mm_market_reason = Some("adverse_bbo_move".to_string());
                                 let cooldown_until =
@@ -20297,38 +20339,10 @@ async fn main() -> Result<()> {
                                 );
                                 preflight_block_reason = None;
                             }
-                            if let Some(reason) = preflight_block_reason {
-                                let canceled = trader_for_mm_rewards
-                                    .cancel_pending_orders_for_scope(
-                                        market_open_ts,
-                                        target.timeframe.as_str(),
-                                        STRATEGY_ID_MM_REWARDS_V1,
-                                        EntryExecutionMode::MmRewards,
-                                        token_id,
-                                        "BUY",
-                                    )
-                                    .await
-                                    .unwrap_or(0);
-                                if canceled > 0 {
-                                    metrics.on_cancel();
-                                }
-                                mm_preflight_blocked_sides.push((
-                                    side_label.to_string(),
-                                    reason.clone(),
-                                    preflight_block_detail.clone(),
-                                ));
-                                let skip_key = format!(
-                                    "mm_rewards_preflight_blocked:{}:{}:{}",
-                                    market.condition_id, token_id, reason
-                                );
-                                let should_emit = last_skip_emit_ms
-                                    .get(skip_key.as_str())
-                                    .map(|last| now_ms.saturating_sub(*last) >= 10_000)
-                                    .unwrap_or(true);
-                                if should_emit {
-                                    last_skip_emit_ms.insert(skip_key, now_ms);
+                            if let Some(reason) = preflight_block_reason.clone() {
+                                if cbb_hard_bypass {
                                     log_event(
-                                        "mm_rewards_preflight_blocked",
+                                        "mm_rewards_cbb_hard_bypass",
                                         json!({
                                             "strategy_id": STRATEGY_ID_MM_REWARDS_V1,
                                             "condition_id": market.condition_id,
@@ -20336,22 +20350,67 @@ async fn main() -> Result<()> {
                                             "side": side_label,
                                             "source": market_source,
                                             "mode": mode.as_str(),
+                                            "gate": "preflight_blocked",
                                             "reason": reason,
-                                            "detail": preflight_block_detail,
-                                            "normal_full_ladder_required": normal_full_ladder_required,
-                                            "covered_levels": covered_levels,
-                                            "required_levels": required_ladder_levels_market,
-                                            "counterpart_source": counterpart_source,
-                                            "counterpart_price": counterpart_price,
-                                            "counterpart_size_shares": counterpart_size_shares,
-                                            "feasible_levels_up_market": feasible_levels_up_market,
-                                            "feasible_levels_down_market": feasible_levels_down_market,
-                                            "feasible_pair_levels_market": feasible_pair_levels_market
+                                            "detail": preflight_block_detail
                                         }),
                                     );
+                                } else {
+                                    let canceled = trader_for_mm_rewards
+                                        .cancel_pending_orders_for_scope(
+                                            market_open_ts,
+                                            target.timeframe.as_str(),
+                                            STRATEGY_ID_MM_REWARDS_V1,
+                                            EntryExecutionMode::MmRewards,
+                                            token_id,
+                                            "BUY",
+                                        )
+                                        .await
+                                        .unwrap_or(0);
+                                    if canceled > 0 {
+                                        metrics.on_cancel();
+                                    }
+                                    mm_preflight_blocked_sides.push((
+                                        side_label.to_string(),
+                                        reason.clone(),
+                                        preflight_block_detail.clone(),
+                                    ));
+                                    let skip_key = format!(
+                                        "mm_rewards_preflight_blocked:{}:{}:{}",
+                                        market.condition_id, token_id, reason
+                                    );
+                                    let should_emit = last_skip_emit_ms
+                                        .get(skip_key.as_str())
+                                        .map(|last| now_ms.saturating_sub(*last) >= 10_000)
+                                        .unwrap_or(true);
+                                    if should_emit {
+                                        last_skip_emit_ms.insert(skip_key, now_ms);
+                                        log_event(
+                                            "mm_rewards_preflight_blocked",
+                                            json!({
+                                                "strategy_id": STRATEGY_ID_MM_REWARDS_V1,
+                                                "condition_id": market.condition_id,
+                                                "token_id": token_id,
+                                                "side": side_label,
+                                                "source": market_source,
+                                                "mode": mode.as_str(),
+                                                "reason": reason,
+                                                "detail": preflight_block_detail,
+                                                "normal_full_ladder_required": normal_full_ladder_required,
+                                                "covered_levels": covered_levels,
+                                                "required_levels": required_ladder_levels_market,
+                                                "counterpart_source": counterpart_source,
+                                                "counterpart_price": counterpart_price,
+                                                "counterpart_size_shares": counterpart_size_shares,
+                                                "feasible_levels_up_market": feasible_levels_up_market,
+                                                "feasible_levels_down_market": feasible_levels_down_market,
+                                                "feasible_pair_levels_market": feasible_pair_levels_market
+                                            }),
+                                        );
+                                    }
+                                    metrics.on_skip();
+                                    continue;
                                 }
-                                metrics.on_skip();
-                                continue;
                             }
 
                             for (
