@@ -9490,6 +9490,8 @@ impl Trader {
 
     fn strategy_post_only_default_override(strategy_id: &str) -> Option<bool> {
         match strategy_id {
+            // MM rewards defaults to maker-only unless explicitly overridden by env.
+            crate::strategy::STRATEGY_ID_MM_REWARDS_V1 => Some(true),
             STRATEGY_ID_MANUAL_PREMARKET_V1 | STRATEGY_ID_MANUAL_CHASE_LIMIT_V1 => Some(true),
             STRATEGY_ID_MANUAL_PREMARKET_TAKER_V1 | STRATEGY_ID_MANUAL_CHASE_LIMIT_TAKER_V1 => {
                 Some(false)
