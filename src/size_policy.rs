@@ -1,6 +1,6 @@
 use crate::strategy::Timeframe;
 
-const DEFAULT_BASE_SIZE_USD: f64 = 100.0;
+const DEFAULT_BASE_SIZE_USD: f64 = 10.0;
 
 pub fn base_size_usd_from_env(env_key: &str) -> f64 {
     std::env::var(env_key)

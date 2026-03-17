@@ -200,7 +200,7 @@ impl EvsnipeConfig {
             anchor_refresh_sec: env_u64("EVPOLY_EVSNIPE_ANCHOR_REFRESH_SEC", 14_400).max(60),
             anchor_drift_refresh_pct: env_f64("EVPOLY_EVSNIPE_ANCHOR_DRIFT_REFRESH_PCT", 0.03)
                 .clamp(0.0, 1.0),
-            size_usd: env_f64("EVPOLY_EVSNIPE_SIZE_USD", 100.0)
+            size_usd: env_f64("EVPOLY_EVSNIPE_SIZE_USD", 10.0)
                 .max(1.0)
                 .min(50_000.0),
             pre_trigger_bps: env_f64("EVPOLY_EVSNIPE_PRE_TRIGGER_BPS", 1.0).clamp(0.0, 100.0),
