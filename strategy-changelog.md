@@ -69,6 +69,11 @@ Older entries may reference env keys that were removed in later commits.
 
 ### 2026-03-17
 
+- `mm_rewards_v1` now enforces reward minimum share size on SELL/exit order paths when reward-min enforcement is enabled and the market side is reward-eligible (`src/main.rs`):
+  - weak-exit sell replacement and inventory-reduction sell paths now compute `min_exit_shares` as `max(exchange_min_shares, reward_min_shares_with_policy)` instead of exchange floor only.
+  - this keeps CBB/MM-reward exit quotes at reward-qualifying share size (including inventory unwind/rebalance ladders), avoiding sub-min-size SELL quotes that forfeit rewards.
+  - affected knobs/code paths: `reward_min_size_enforce`, `mm_reward_min_shares_with_policy`, and SELL `min_exit_shares` calculation in MM rewards loop.
+
 - `mm_rewards_v1` added CBB priority market path for MM auto-selection and execution policy (`src/main.rs`, `src/mm/mod.rs`, `src/mm/reward_scanner.rs`, `src/bin/alpha_service.rs`, `.env.example`, `.env.full.example`, `docs/mm_rewards_v1.md`):
   - auto candidate payloads and in-memory candidates now carry `is_cbb` metadata, and MM auto refresh injects top CBB candidates into active selection when enabled.
   - new MM env knobs:

@@ -16875,10 +16875,26 @@ async fn main() -> Result<()> {
                                             mm_cfg_for_loop.min_price,
                                             mm_cfg_for_loop.max_price,
                                         );
-                                    let min_exit_shares =
-                                        order_floor.exchange_min_shares(exit_price);
-                                    let reward_min_size_shares_hint =
-                                        order_floor.min_size_shares.max(0.0);
+                                    let reward_min_size_shares_hint = if mm_cfg_for_loop
+                                        .reward_min_size_enforce
+                                        && reward_eligible
+                                    {
+                                        mm_reward_min_shares_with_policy(
+                                            detail_snapshot.min_size,
+                                            exit_price,
+                                            Some(exit_price),
+                                            mm_cfg_for_loop.reward_min_size_unit,
+                                            mm_cfg_for_loop.reward_min_target_mult,
+                                            mm_cfg_for_loop.reward_min_floor_mode,
+                                            mm_cfg_for_loop.reward_min_floor_max_mult,
+                                            mm_cfg_for_loop.reward_min_shares_cap,
+                                        )
+                                    } else {
+                                        0.0
+                                    };
+                                    let min_exit_shares = order_floor
+                                        .exchange_min_shares(exit_price)
+                                        .max(reward_min_size_shares_hint);
                                     let dynamic_target_shares = (token_balance_shares
                                         - mm_cfg_for_loop.weak_exit_imbalance_safety_buffer_shares)
                                         .max(0.0);
@@ -20984,10 +21000,26 @@ async fn main() -> Result<()> {
                                     let min_exit_floor_price = exit_price_anchor
                                         .max(best_ask)
                                         .max(mm_cfg_for_loop.min_price);
-                                    let min_exit_shares =
-                                        order_floor.exchange_min_shares(min_exit_floor_price);
-                                    let reward_min_size_shares_hint =
-                                        order_floor.min_size_shares.max(0.0);
+                                    let reward_min_size_shares_hint = if mm_cfg_for_loop
+                                        .reward_min_size_enforce
+                                        && reward_eligible
+                                    {
+                                        mm_reward_min_shares_with_policy(
+                                            detail_snapshot.min_size,
+                                            min_exit_floor_price,
+                                            Some(min_exit_floor_price),
+                                            mm_cfg_for_loop.reward_min_size_unit,
+                                            mm_cfg_for_loop.reward_min_target_mult,
+                                            mm_cfg_for_loop.reward_min_floor_mode,
+                                            mm_cfg_for_loop.reward_min_floor_max_mult,
+                                            mm_cfg_for_loop.reward_min_shares_cap,
+                                        )
+                                    } else {
+                                        0.0
+                                    };
+                                    let min_exit_shares = order_floor
+                                        .exchange_min_shares(min_exit_floor_price)
+                                        .max(reward_min_size_shares_hint);
                                     let market_scope_open_rows = tracking_db_for_mm_rewards
                                         .list_open_pending_orders_for_market_scope_labeled(
                                             target.timeframe.as_str(),
@@ -21869,10 +21901,26 @@ async fn main() -> Result<()> {
                                             );
                                             continue;
                                         }
-                                        let min_exit_shares =
-                                            order_floor.exchange_min_shares(exit_price);
-                                        let reward_min_size_shares_hint =
-                                            order_floor.min_size_shares.max(0.0);
+                                        let reward_min_size_shares_hint = if mm_cfg_for_loop
+                                            .reward_min_size_enforce
+                                            && reward_eligible
+                                        {
+                                            mm_reward_min_shares_with_policy(
+                                                detail_snapshot.min_size,
+                                                exit_price,
+                                                Some(exit_price),
+                                                mm_cfg_for_loop.reward_min_size_unit,
+                                                mm_cfg_for_loop.reward_min_target_mult,
+                                                mm_cfg_for_loop.reward_min_floor_mode,
+                                                mm_cfg_for_loop.reward_min_floor_max_mult,
+                                                mm_cfg_for_loop.reward_min_shares_cap,
+                                            )
+                                        } else {
+                                            0.0
+                                        };
+                                        let min_exit_shares = order_floor
+                                            .exchange_min_shares(exit_price)
+                                            .max(reward_min_size_shares_hint);
                                         if mm_active_exit_sells.get(weak_token_id).is_none()
                                             && reserved_open_exit_shares + 1e-9 >= min_exit_shares
                                         {
@@ -25060,7 +25108,7 @@ impl PremarketOrderFloor {
     }
 
     // Polymarket "rewards.min_size" is an incentive target, not a hard CLOB minimum.
-    // Exit logic should honor exchange floor only, otherwise dead-capital exits can stall.
+    // Caller may layer reward-min policy on top when reward eligibility must be preserved.
     fn exchange_min_shares(self, price: f64) -> f64 {
         let safe_price = price.max(0.000001);
         (self.min_notional_usd.max(0.0) / safe_price).max(1.0)
