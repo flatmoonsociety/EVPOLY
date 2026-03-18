@@ -5795,6 +5795,11 @@ async fn main() -> Result<()> {
                         let proxy_age_ms = proxy_update_ts_ms
                             .map(|ts| now_ms.saturating_sub(ts))
                             .filter(|age| *age >= 0);
+                        let alpha_submit_proxy_max_age_ms =
+                            endgame_alpha_submit_proxy_max_age_ms_for_symbol(
+                                symbol.as_str(),
+                                alpha_policy.submit_proxy_max_age_ms,
+                            );
                         let request = ArbiterExecutionRequest {
                             request_id: format!(
                                 "endgame:{}:{}:{}:{}:tick{}",
@@ -5814,9 +5819,7 @@ async fn main() -> Result<()> {
                                 chrono::Utc::now().timestamp_millis(),
                             )
                             .with_proxy_snapshot(proxy_update_ts_ms, proxy_age_ms)
-                            .with_proxy_max_age_override(Some(
-                                alpha_policy.submit_proxy_max_age_ms,
-                            )),
+                            .with_proxy_max_age_override(Some(alpha_submit_proxy_max_age_ms)),
                         };
 
                         let mut endgame_tick_payload = serde_json::Map::new();
@@ -5838,7 +5841,7 @@ async fn main() -> Result<()> {
                         );
                         endgame_tick_payload.insert(
                             "alpha_submit_proxy_max_age_ms".to_string(),
-                            json!(alpha_policy.submit_proxy_max_age_ms),
+                            json!(alpha_submit_proxy_max_age_ms),
                         );
                         endgame_tick_payload.insert(
                             "alpha_source".to_string(),
@@ -6132,7 +6135,7 @@ async fn main() -> Result<()> {
                                     "bias_confidence": plan.bias_confidence,
                                     "divergence_reduced": divergence_reduced,
                                     "alpha_tick_offsets_ms": alpha_policy.tick_offsets_ms.clone(),
-                                    "alpha_submit_proxy_max_age_ms": alpha_policy.submit_proxy_max_age_ms,
+                                    "alpha_submit_proxy_max_age_ms": alpha_submit_proxy_max_age_ms,
                                     "alpha_source": alpha_policy.source.as_str(),
                                     "alpha_reason": alpha_policy.reason.as_deref()
                                 })),
@@ -6173,7 +6176,7 @@ async fn main() -> Result<()> {
                                         "request_id": selected_impulse_id.as_str(),
                                         "status": "sent",
                                         "alpha_tick_offsets_ms": alpha_policy.tick_offsets_ms.clone(),
-                                        "alpha_submit_proxy_max_age_ms": alpha_policy.submit_proxy_max_age_ms,
+                                        "alpha_submit_proxy_max_age_ms": alpha_submit_proxy_max_age_ms,
                                         "alpha_source": alpha_policy.source.as_str(),
                                         "alpha_reason": alpha_policy.reason.as_deref()
                                     }),
@@ -6201,7 +6204,7 @@ async fn main() -> Result<()> {
                                         "request_id": selected_impulse_id.as_str(),
                                         "status": "deduped",
                                         "alpha_tick_offsets_ms": alpha_policy.tick_offsets_ms.clone(),
-                                        "alpha_submit_proxy_max_age_ms": alpha_policy.submit_proxy_max_age_ms,
+                                        "alpha_submit_proxy_max_age_ms": alpha_submit_proxy_max_age_ms,
                                         "alpha_source": alpha_policy.source.as_str(),
                                         "alpha_reason": alpha_policy.reason.as_deref()
                                     }),
@@ -30035,6 +30038,14 @@ fn endgame_proxy_source_for_symbol_timeframe(
         },
         _ => EndgameProxySource::Coinbase,
     }
+}
+
+fn endgame_alpha_submit_proxy_max_age_ms_for_symbol(symbol: &str, base_max_age_ms: i64) -> i64 {
+    let multiplier = match normalize_market_symbol(symbol).as_str() {
+        "DOGE" | "BNB" | "HYPE" => 3_i64,
+        _ => 1_i64,
+    };
+    base_max_age_ms.saturating_mul(multiplier).clamp(50, 10_000)
 }
 
 fn synthetic_endgame_book_snapshot(

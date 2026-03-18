@@ -147,6 +147,11 @@ Older entries may reference env keys that were removed in later commits.
   - added normalize/slug-prefix/H1-D1 asset prefix handling so discovery validation accepts these symbols across `5m/15m/1h/4h` naming paths.
   - touched code paths: `normalize_market_symbol`, `market_symbol_slug_prefixes`, `h1_symbol_from_market_slug`, `h1_market_slug_matches_target_open_ts` fallback symbol set, and `h1_event_slug_asset_prefix`.
 
+- `endgame_sweep_v1` submit stale allowance now applies a hardcoded symbol multiplier for the new 3 symbols (`src/main.rs`):
+  - runtime now multiplies remote alpha `submit_proxy_max_age_ms` by `3x` for `DOGE`, `BNB`, and `HYPE` before enqueueing endgame requests.
+  - the effective value is now used in arbiter request proxy-age override and endgame execution telemetry payloads (`alpha_submit_proxy_max_age_ms`).
+  - affects endgame proxy-stale gating across enabled endgame timeframes for `DOGE/BNB/HYPE` only; other symbols keep the unscaled remote alpha value.
+
 ### 2026-03-17
 
 - Shared size policy symbol multiplier defaults expanded to include `DOGE/BNB/HYPE` at `0.5` (`src/size_policy.rs`, `.env.full.example`):
