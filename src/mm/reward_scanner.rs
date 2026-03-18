@@ -465,6 +465,11 @@ pub async fn seed_auto_candidates_from_rewards_feed(
             || details.closed
             || details.condition_id.trim().is_empty()
             || details.market_slug.trim().is_empty()
+            || is_sports_market_details(
+                details.tags.as_slice(),
+                details.market_slug.as_str(),
+                row.market_slug.as_str(),
+            )
             || is_market_expired(&details, now_ms)
             || is_market_inside_exit_window(&details, now_ms, cfg.near_expiry_exit_window_sec)
         {
