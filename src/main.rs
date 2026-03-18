@@ -43,6 +43,7 @@ use polymarket_arbitrage_bot::event_log::{init_event_log, log_event};
 use polymarket_arbitrage_bot::evsnipe;
 use polymarket_arbitrage_bot::feature_engine_v2::FeatureEngineV2;
 use polymarket_arbitrage_bot::hl_signals::{self, HlSignalsConfig};
+use polymarket_arbitrage_bot::hyperliquid_wss::{self, HyperliquidWssConfig};
 use polymarket_arbitrage_bot::market_discovery::{
     discover_market, discover_solana_market, discover_xrp_market, eth_disabled_fallback_market,
     get_or_discover_markets, solana_disabled_fallback_market, xrp_disabled_fallback_market,
@@ -4721,9 +4722,18 @@ async fn main() -> Result<()> {
         let endgame_alpha_wallet_for_loop = endgame_alpha_wallet.clone();
         let near_base_skip_bps_for_endgame = near_base_skip_bps;
         let signal_state_for_endgame = signal_state.clone();
+        let endgame_timeframes = endgame_cfg.enabled_timeframes();
         let mut coinbase_states_by_symbol: std::collections::HashMap<
             String,
             coinbase_ws::SharedCoinbaseBookState,
+        > = std::collections::HashMap::new();
+        let mut endgame_binance_states_by_symbol: std::collections::HashMap<
+            String,
+            polymarket_arbitrage_bot::signal_state::SharedSignalState,
+        > = std::collections::HashMap::new();
+        let mut endgame_hyperliquid_states_by_symbol: std::collections::HashMap<
+            String,
+            polymarket_arbitrage_bot::signal_state::SharedSignalState,
         > = std::collections::HashMap::new();
         let default_coinbase_cfg = CoinbaseWsConfig::default();
         let default_symbol =
@@ -4731,37 +4741,101 @@ async fn main() -> Result<()> {
                 .unwrap_or("BTC")
                 .to_string();
         for symbol in endgame_symbols.iter() {
-            if symbol.eq_ignore_ascii_case(default_symbol.as_str()) {
-                coinbase_states_by_symbol.insert(symbol.clone(), coinbase_book_state.clone());
-                continue;
+            let requires_coinbase = endgame_timeframes.iter().any(|timeframe| {
+                endgame_proxy_source_for_symbol_timeframe(symbol.as_str(), *timeframe)
+                    == EndgameProxySource::Coinbase
+            });
+            let requires_binance = endgame_timeframes.iter().any(|timeframe| {
+                endgame_proxy_source_for_symbol_timeframe(symbol.as_str(), *timeframe)
+                    == EndgameProxySource::Binance
+            });
+            let requires_hyperliquid = endgame_timeframes.iter().any(|timeframe| {
+                endgame_proxy_source_for_symbol_timeframe(symbol.as_str(), *timeframe)
+                    == EndgameProxySource::Hyperliquid
+            });
+
+            if requires_coinbase {
+                if symbol.eq_ignore_ascii_case(default_symbol.as_str()) {
+                    coinbase_states_by_symbol.insert(symbol.clone(), coinbase_book_state.clone());
+                } else if let Some(product_id) =
+                    coinbase_product_id_for_market_symbol(symbol.as_str())
+                {
+                    let extra_state = new_shared_coinbase_book_state();
+                    let mut extra_cfg = default_coinbase_cfg.clone();
+                    extra_cfg.product_id = product_id.to_string();
+                    let _extra_coinbase_feed = coinbase_ws::spawn_coinbase_level2_feed(
+                        extra_cfg,
+                        extra_state.clone(),
+                        None,
+                    );
+                    log_event(
+                        "endgame_coinbase_feed_spawned",
+                        json!({
+                            "strategy_id": STRATEGY_ID_ENDGAME_SWEEP_V1,
+                            "symbol": symbol,
+                            "product_id": product_id
+                        }),
+                    );
+                    coinbase_states_by_symbol.insert(symbol.clone(), extra_state);
+                } else {
+                    log_event(
+                        "endgame_symbol_coinbase_product_missing",
+                        json!({
+                            "strategy_id": STRATEGY_ID_ENDGAME_SWEEP_V1,
+                            "symbol": symbol,
+                            "reason": "unsupported_symbol_for_coinbase_product_mapping"
+                        }),
+                    );
+                }
             }
-            let Some(product_id) = coinbase_product_id_for_market_symbol(symbol.as_str()) else {
+
+            if requires_binance {
+                if symbol.eq_ignore_ascii_case("BTC") {
+                    endgame_binance_states_by_symbol.insert(symbol.clone(), signal_state.clone());
+                } else {
+                    let symbol_state = new_shared_signal_state();
+                    let mut cfg = BinanceWssConfig::default();
+                    cfg.stream_url = format!(
+                        "wss://stream.binance.com:9443/ws/{}usdt@trade",
+                        symbol.to_ascii_lowercase()
+                    );
+                    let stream_url = cfg.stream_url.clone();
+                    let _binance_feed =
+                        binance_wss::spawn_binance_trade_feed(cfg, symbol_state.clone());
+                    endgame_binance_states_by_symbol.insert(symbol.clone(), symbol_state);
+                    log_event(
+                        "endgame_binance_feed_spawned",
+                        json!({
+                            "strategy_id": STRATEGY_ID_ENDGAME_SWEEP_V1,
+                            "symbol": symbol,
+                            "stream_url": stream_url
+                        }),
+                    );
+                }
+            }
+
+            if requires_hyperliquid {
+                let symbol_state = new_shared_signal_state();
+                let mut cfg = HyperliquidWssConfig::default();
+                cfg.coin = "@107".to_string(); // HYPE/USDC spot
+                let stream_url = cfg.stream_url.clone();
+                let _hyperliquid_feed =
+                    hyperliquid_wss::spawn_hyperliquid_trade_feed(cfg, symbol_state.clone());
+                endgame_hyperliquid_states_by_symbol.insert(symbol.clone(), symbol_state);
                 log_event(
-                    "endgame_symbol_coinbase_product_missing",
+                    "endgame_hyperliquid_feed_spawned",
                     json!({
                         "strategy_id": STRATEGY_ID_ENDGAME_SWEEP_V1,
                         "symbol": symbol,
-                        "reason": "unsupported_symbol_for_coinbase_product_mapping"
+                        "stream_url": stream_url,
+                        "coin": "@107"
                     }),
                 );
-                continue;
-            };
-            let extra_state = new_shared_coinbase_book_state();
-            let mut extra_cfg = default_coinbase_cfg.clone();
-            extra_cfg.product_id = product_id.to_string();
-            let _extra_coinbase_feed =
-                coinbase_ws::spawn_coinbase_level2_feed(extra_cfg, extra_state.clone(), None);
-            log_event(
-                "endgame_coinbase_feed_spawned",
-                json!({
-                    "strategy_id": STRATEGY_ID_ENDGAME_SWEEP_V1,
-                    "symbol": symbol,
-                    "product_id": product_id
-                }),
-            );
-            coinbase_states_by_symbol.insert(symbol.clone(), extra_state);
+            }
         }
         let coinbase_states_for_endgame = Arc::new(coinbase_states_by_symbol);
+        let endgame_binance_states_for_loop = Arc::new(endgame_binance_states_by_symbol);
+        let endgame_hyperliquid_states_for_loop = Arc::new(endgame_hyperliquid_states_by_symbol);
         let api_for_endgame = api.clone();
         let tracking_db_for_endgame = tracking_db.clone();
         let arbiter_exec_tx_for_endgame = arbiter_exec_tx_for_endgame.clone();
@@ -4838,16 +4912,20 @@ async fn main() -> Result<()> {
                 };
                 for symbol in endgame_symbols_for_loop.iter() {
                     let symbol_market_key = symbol.to_ascii_lowercase();
-                    let coinbase_snapshot = {
-                        let Some(shared_state) = coinbase_states_for_endgame.get(symbol.as_str())
+                    for timeframe in endgame_cfg_for_loop.enabled_timeframes() {
+                        let Some(coinbase_snapshot) = read_endgame_proxy_book_snapshot(
+                            symbol.as_str(),
+                            timeframe,
+                            now_ms,
+                            endgame_cfg_for_loop.book_freshness_ms,
+                            coinbase_states_for_endgame.as_ref(),
+                            endgame_binance_states_for_loop.as_ref(),
+                            endgame_hyperliquid_states_for_loop.as_ref(),
+                        )
+                        .await
                         else {
                             continue;
                         };
-                        let guard = shared_state.read().await;
-                        guard.clone()
-                    };
-
-                    for timeframe in endgame_cfg_for_loop.enabled_timeframes() {
                         let market_open_ts = endgame_sweep::timeframe_open_ts(now_ts, timeframe);
                         if market_open_ts <= 0 {
                             continue;
@@ -26525,6 +26603,9 @@ fn normalize_market_symbol(symbol: &str) -> String {
         "ETH" => "ETH".to_string(),
         "SOL" | "SOLANA" => "SOL".to_string(),
         "XRP" => "XRP".to_string(),
+        "DOGE" | "DOGECOIN" => "DOGE".to_string(),
+        "BNB" => "BNB".to_string(),
+        "HYPE" => "HYPE".to_string(),
         other => other.to_string(),
     }
 }
@@ -26535,6 +26616,9 @@ fn market_symbol_slug_prefixes(symbol: &str) -> &'static [&'static str] {
         "ETH" => &["eth"],
         "SOL" => &["sol", "solana"],
         "XRP" => &["xrp"],
+        "DOGE" => &["doge", "dogecoin"],
+        "BNB" => &["bnb"],
+        "HYPE" => &["hype", "hyperliquid"],
         _ => &["btc"],
     }
 }
@@ -26545,6 +26629,7 @@ fn coinbase_product_id_for_market_symbol(symbol: &str) -> Option<&'static str> {
         "ETH" => Some("ETH-USD"),
         "SOL" => Some("SOL-USD"),
         "XRP" => Some("XRP-USD"),
+        "DOGE" => Some("DOGE-USD"),
         _ => None,
     }
 }
@@ -26555,6 +26640,7 @@ fn market_symbol_from_coinbase_product_id(product_id: &str) -> Option<&'static s
         "ETH-USD" => Some("ETH"),
         "SOL-USD" => Some("SOL"),
         "XRP-USD" => Some("XRP"),
+        "DOGE-USD" => Some("DOGE"),
         _ => None,
     }
 }
@@ -28595,6 +28681,18 @@ fn h1_symbol_from_market_slug(market_slug: &str) -> Option<&'static str> {
     if slug.starts_with("xrp-up-or-down-") || slug.starts_with("xrp-updown-1h-") {
         return Some("XRP");
     }
+    if slug.starts_with("dogecoin-up-or-down-") || slug.starts_with("doge-updown-1h-") {
+        return Some("DOGE");
+    }
+    if slug.starts_with("bnb-up-or-down-") || slug.starts_with("bnb-updown-1h-") {
+        return Some("BNB");
+    }
+    if slug.starts_with("hype-up-or-down-")
+        || slug.starts_with("hyperliquid-up-or-down-")
+        || slug.starts_with("hype-updown-1h-")
+    {
+        return Some("HYPE");
+    }
     None
 }
 
@@ -28628,11 +28726,13 @@ fn h1_market_slug_matches_target_open_ts(market_slug: &str, target_open_ts: u64)
     }
 
     // Fallback compatibility across known symbols.
-    ["BTC", "ETH", "SOL", "XRP"].iter().any(|symbol| {
-        h1_target_slug_for_open_ts_for_symbol(symbol, target_open_ts)
-            .map(|expected_slug| slug.eq(expected_slug.as_str()))
-            .unwrap_or(false)
-    })
+    ["BTC", "ETH", "SOL", "XRP", "DOGE", "BNB", "HYPE"]
+        .iter()
+        .any(|symbol| {
+            h1_target_slug_for_open_ts_for_symbol(symbol, target_open_ts)
+                .map(|expected_slug| slug.eq(expected_slug.as_str()))
+                .unwrap_or(false)
+        })
 }
 
 fn h1_market_period_mismatch_for_trade(
@@ -29253,6 +29353,9 @@ fn h1_event_slug_asset_prefix(symbol: &str) -> Option<&'static str> {
         "ETH" => Some("ethereum"),
         "SOL" => Some("solana"),
         "XRP" => Some("xrp"),
+        "DOGE" => Some("dogecoin"),
+        "BNB" => Some("bnb"),
+        "HYPE" => Some("hype"),
         _ => None,
     }
 }
@@ -29889,6 +29992,151 @@ impl EvcurveFakAskProbe {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EndgameProxySource {
+    Coinbase,
+    Binance,
+    Hyperliquid,
+}
+
+fn endgame_proxy_source_for_symbol_timeframe(
+    symbol: &str,
+    timeframe: Timeframe,
+) -> EndgameProxySource {
+    match normalize_market_symbol(symbol).as_str() {
+        "BNB" => EndgameProxySource::Binance,
+        "HYPE" => match timeframe {
+            Timeframe::M5 | Timeframe::M15 | Timeframe::H4 => EndgameProxySource::Hyperliquid,
+            _ => EndgameProxySource::Binance,
+        },
+        _ => EndgameProxySource::Coinbase,
+    }
+}
+
+fn synthetic_endgame_book_snapshot(
+    mid: f64,
+    update_ts_ms: i64,
+    product_id: String,
+) -> Option<coinbase_ws::CoinbaseBookState> {
+    if !mid.is_finite() || mid <= 0.0 || update_ts_ms <= 0 {
+        return None;
+    }
+    let full_spread_bps = 3.0_f64;
+    let half_spread = (mid * (full_spread_bps / 20_000.0)).max(mid * 0.000001);
+    let best_bid = mid - half_spread;
+    let best_ask = mid + half_spread;
+    if !best_bid.is_finite()
+        || !best_ask.is_finite()
+        || best_bid <= 0.0
+        || best_ask <= best_bid
+        || !half_spread.is_finite()
+    {
+        return None;
+    }
+    let synthetic_depth_usd = 10_000.0_f64;
+    let bid_size = (synthetic_depth_usd / best_bid).max(1e-6);
+    let ask_size = (synthetic_depth_usd / best_ask).max(1e-6);
+    let mut snapshot = coinbase_ws::CoinbaseBookState::default();
+    snapshot.feed_state = coinbase_ws::CoinbaseFeedState::Healthy;
+    snapshot.product_id = product_id;
+    snapshot.best_bid = Some(best_bid);
+    snapshot.best_ask = Some(best_ask);
+    snapshot.mid_price = Some(mid);
+    snapshot.spread = Some((best_ask - best_bid).max(0.0));
+    snapshot.top_bid_depth = Some(bid_size);
+    snapshot.top_ask_depth = Some(ask_size);
+    snapshot.bid_levels = vec![coinbase_ws::CoinbaseBookLevel {
+        price: best_bid,
+        size: bid_size,
+    }];
+    snapshot.ask_levels = vec![coinbase_ws::CoinbaseBookLevel {
+        price: best_ask,
+        size: ask_size,
+    }];
+    snapshot.last_trade_ts_ms = Some(update_ts_ms);
+    snapshot.last_update_ms = update_ts_ms;
+    snapshot.last_state_transition_ms = update_ts_ms;
+    snapshot.state_reason = Some("synthetic_proxy_trade".to_string());
+    Some(snapshot)
+}
+
+async fn read_endgame_proxy_book_snapshot(
+    symbol: &str,
+    timeframe: Timeframe,
+    now_ms: i64,
+    proxy_stale_ms: i64,
+    coinbase_states: &std::collections::HashMap<String, coinbase_ws::SharedCoinbaseBookState>,
+    binance_states: &std::collections::HashMap<
+        String,
+        polymarket_arbitrage_bot::signal_state::SharedSignalState,
+    >,
+    hyperliquid_states: &std::collections::HashMap<
+        String,
+        polymarket_arbitrage_bot::signal_state::SharedSignalState,
+    >,
+) -> Option<coinbase_ws::CoinbaseBookState> {
+    match endgame_proxy_source_for_symbol_timeframe(symbol, timeframe) {
+        EndgameProxySource::Coinbase => {
+            let state = coinbase_states.get(symbol)?;
+            let snapshot = {
+                let guard = state.read().await;
+                guard.clone()
+            };
+            if snapshot.feed_state != coinbase_ws::CoinbaseFeedState::Healthy {
+                return None;
+            }
+            let update_ts_ms = snapshot.last_update_ms;
+            if update_ts_ms <= 0 || now_ms.saturating_sub(update_ts_ms) > proxy_stale_ms {
+                return None;
+            }
+            let _ = snapshot
+                .mid_price
+                .filter(|value| value.is_finite() && *value > 0.0)?;
+            Some(snapshot)
+        }
+        EndgameProxySource::Binance => {
+            let state = binance_states.get(symbol)?;
+            let snapshot = {
+                let guard = state.read().await;
+                guard.clone()
+            };
+            let mid = snapshot
+                .binance_flow
+                .last_price
+                .filter(|value| value.is_finite() && *value > 0.0)?;
+            let update_ts_ms = snapshot.binance_flow.last_trade_ts_ms.unwrap_or(0);
+            if update_ts_ms <= 0 || now_ms.saturating_sub(update_ts_ms) > proxy_stale_ms {
+                return None;
+            }
+            synthetic_endgame_book_snapshot(
+                mid,
+                update_ts_ms,
+                format!("BINANCE:{}USDT", normalize_market_symbol(symbol)),
+            )
+        }
+        EndgameProxySource::Hyperliquid => {
+            let state = hyperliquid_states.get(symbol)?;
+            let snapshot = {
+                let guard = state.read().await;
+                guard.clone()
+            };
+            let mid = snapshot
+                .hl_flow
+                .last_price
+                .filter(|value| value.is_finite() && *value > 0.0)?;
+            let update_ts_ms = snapshot.hl_flow.last_fill_ts_ms.unwrap_or(0);
+            if update_ts_ms <= 0 || now_ms.saturating_sub(update_ts_ms) > proxy_stale_ms {
+                return None;
+            }
+            synthetic_endgame_book_snapshot(
+                mid,
+                update_ts_ms,
+                format!("HYPERLIQUID:{}USDC", normalize_market_symbol(symbol)),
+            )
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct EvcurveProxySnapshot {
     source: ProxySource,
@@ -30401,7 +30649,7 @@ mod tests {
     }
 
     #[test]
-    fn h1_symbol_slug_generation_supports_eth_sol_xrp() {
+    fn h1_symbol_slug_generation_supports_eth_sol_xrp_doge_bnb_hype() {
         let target_open_ts = 1_771_574_400_u64; // 2026-02-20 08:00:00 UTC (3am ET)
         assert_eq!(
             h1_target_slug_for_open_ts_for_symbol("ETH", target_open_ts).as_deref(),
@@ -30414,6 +30662,18 @@ mod tests {
         assert_eq!(
             h1_target_slug_for_open_ts_for_symbol("XRP", target_open_ts).as_deref(),
             Some("xrp-up-or-down-february-20-3am-et")
+        );
+        assert_eq!(
+            h1_target_slug_for_open_ts_for_symbol("DOGE", target_open_ts).as_deref(),
+            Some("dogecoin-up-or-down-february-20-3am-et")
+        );
+        assert_eq!(
+            h1_target_slug_for_open_ts_for_symbol("BNB", target_open_ts).as_deref(),
+            Some("bnb-up-or-down-february-20-3am-et")
+        );
+        assert_eq!(
+            h1_target_slug_for_open_ts_for_symbol("HYPE", target_open_ts).as_deref(),
+            Some("hype-up-or-down-february-20-3am-et")
         );
     }
 
@@ -30436,6 +30696,18 @@ mod tests {
         assert_eq!(
             d1_target_slug_for_open_ts_for_symbol("XRP", target_open_ts).as_deref(),
             Some("xrp-up-or-down-on-february-25")
+        );
+        assert_eq!(
+            d1_target_slug_for_open_ts_for_symbol("DOGE", target_open_ts).as_deref(),
+            Some("dogecoin-up-or-down-on-february-25")
+        );
+        assert_eq!(
+            d1_target_slug_for_open_ts_for_symbol("BNB", target_open_ts).as_deref(),
+            Some("bnb-up-or-down-on-february-25")
+        );
+        assert_eq!(
+            d1_target_slug_for_open_ts_for_symbol("HYPE", target_open_ts).as_deref(),
+            Some("hype-up-or-down-on-february-25")
         );
     }
 

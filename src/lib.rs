@@ -14,6 +14,7 @@ pub mod evsnipe;
 pub mod execution_pricing;
 pub mod feature_engine_v2;
 pub mod hl_signals;
+pub mod hyperliquid_wss;
 pub mod kelly;
 pub mod market_discovery;
 pub mod merge;

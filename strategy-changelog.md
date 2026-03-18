@@ -120,6 +120,20 @@ Older entries may reference env keys that were removed in later commits.
   - added runtime safety guard: if any sports market still reaches the MM rewards execution loop, MM rewards skips it and strategy-scoped cancels `mm_rewards_v1` pending orders for that condition.
   - affects `mm_rewards_v1` only; cancellation path is strategy-scoped and does not touch `mm_sport_v1` orders.
 
+- `endgame_sweep_v1` proxy-source routing was hardcoded for the 7-symbol default universe (`src/main.rs`, `src/hyperliquid_wss.rs`, `src/lib.rs`):
+  - `BNB` now uses Binance spot trade feed (`bnbusdt@trade`) for all enabled endgame timeframes.
+  - `HYPE` now uses Hyperliquid spot trade feed (`HYPEUSDC`, hardcoded coin `@107`) for `5m/15m/4h`, and Binance trade feed for `1h`.
+  - synthetic proxy snapshots are generated from Binance/Hyperliquid trade prints to preserve existing endgame planner interfaces (`CoinbaseBookState` path) with minimal strategy logic changes.
+  - affects endgame proxy input path only; strategy toggles and endgame symbol default env (`EVPOLY_ENDGAME_SYMBOLS`) remain unchanged.
+
+- `endgame_sweep_v1` DOGE path was aligned to XRP-style Coinbase routing (`src/main.rs`):
+  - added `DOGE <-> DOGE-USD` Coinbase product mapping in shared market-symbol helper functions used by endgame feed bootstrap.
+  - DOGE now uses the same Coinbase level2 proxy path as BTC/ETH/SOL/XRP in endgame.
+
+- Shared timeframe slug helpers were extended for `DOGE/BNB/HYPE` (`src/main.rs` tests + helpers):
+  - added normalize/slug-prefix/H1-D1 asset prefix handling so discovery validation accepts these symbols across `5m/15m/1h/4h` naming paths.
+  - touched code paths: `normalize_market_symbol`, `market_symbol_slug_prefixes`, `h1_symbol_from_market_slug`, `h1_market_slug_matches_target_open_ts` fallback symbol set, and `h1_event_slug_asset_prefix`.
+
 ### 2026-03-17
 
 - Shared size policy symbol multiplier defaults expanded to include `DOGE/BNB/HYPE` at `0.5` (`src/size_policy.rs`, `.env.full.example`):
