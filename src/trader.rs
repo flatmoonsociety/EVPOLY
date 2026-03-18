@@ -9480,6 +9480,7 @@ impl Trader {
             }
             crate::strategy::STRATEGY_ID_EVSNIPE_V1 => Some("EVPOLY_ENTRY_POST_ONLY_EVSNIPE"),
             crate::strategy::STRATEGY_ID_MM_REWARDS_V1 => Some("EVPOLY_ENTRY_POST_ONLY_MM_REWARDS"),
+            crate::strategy::STRATEGY_ID_MM_SPORT_V1 => Some("EVPOLY_ENTRY_POST_ONLY_MM_SPORT"),
             STRATEGY_ID_MANUAL_CHASE_LIMIT_V1 => Some("EVPOLY_ENTRY_POST_ONLY_MANUAL_CHASE"),
             STRATEGY_ID_MANUAL_CHASE_LIMIT_TAKER_V1 => {
                 Some("EVPOLY_ENTRY_POST_ONLY_MANUAL_CHASE_TAKER")
@@ -9491,7 +9492,8 @@ impl Trader {
     fn strategy_post_only_default_override(strategy_id: &str) -> Option<bool> {
         match strategy_id {
             // MM rewards defaults to maker-only unless explicitly overridden by env.
-            crate::strategy::STRATEGY_ID_MM_REWARDS_V1 => Some(true),
+            crate::strategy::STRATEGY_ID_MM_REWARDS_V1
+            | crate::strategy::STRATEGY_ID_MM_SPORT_V1 => Some(true),
             STRATEGY_ID_MANUAL_PREMARKET_V1 | STRATEGY_ID_MANUAL_CHASE_LIMIT_V1 => Some(true),
             STRATEGY_ID_MANUAL_PREMARKET_TAKER_V1 | STRATEGY_ID_MANUAL_CHASE_LIMIT_TAKER_V1 => {
                 Some(false)
@@ -9516,6 +9518,9 @@ impl Trader {
 
     fn entry_post_only_enabled_for_strategy(strategy_id: &str) -> bool {
         let normalized = Self::normalize_strategy_id(Some(strategy_id));
+        if normalized == crate::strategy::STRATEGY_ID_MM_SPORT_V1 {
+            return true;
+        }
         let global_default = Self::env_bool_named("EVPOLY_ENTRY_POST_ONLY", false);
         let default_fallback = Self::strategy_post_only_default_override(normalized.as_str())
             .unwrap_or(global_default);

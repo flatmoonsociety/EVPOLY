@@ -803,6 +803,17 @@ pub struct EntryFillEventRecord {
 }
 
 #[derive(Debug, Clone)]
+pub struct StrategyFillEventRecord {
+    pub event_key: String,
+    pub ts_ms: i64,
+    pub strategy_id: String,
+    pub condition_id: String,
+    pub token_id: String,
+    pub side: String,
+    pub event_type: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct SnapbackFeatureSnapshotIntentRecord {
     pub strategy_id: String,
     pub timeframe: String,
@@ -12413,6 +12424,61 @@ LIMIT ?3
                         side: row.get(8)?,
                         price: row.get(9)?,
                         notional_usd: row.get(10)?,
+                    })
+                },
+            )?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row?);
+            }
+            Ok(out)
+        })
+    }
+
+    pub fn list_strategy_fill_events_since(
+        &self,
+        strategy_id: &str,
+        since_ts_ms: i64,
+        limit: usize,
+    ) -> Result<Vec<StrategyFillEventRecord>> {
+        let normalized_strategy = normalize_strategy_id(strategy_id);
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                r#"
+SELECT
+    id,
+    ts_ms,
+    COALESCE(event_key, printf('legacy_strategy_fill:%d:%d', id, ts_ms)),
+    COALESCE(NULLIF(TRIM(strategy_id), ''), 'legacy_default'),
+    condition_id,
+    token_id,
+    UPPER(COALESCE(NULLIF(TRIM(side), ''), 'BUY')),
+    UPPER(COALESCE(NULLIF(TRIM(event_type), ''), 'ENTRY_FILL'))
+FROM trade_events
+WHERE ts_ms >= ?1
+  AND COALESCE(NULLIF(TRIM(strategy_id), ''), 'legacy_default') = ?2
+  AND event_type IN ('ENTRY_FILL', 'EXIT')
+  AND condition_id IS NOT NULL
+  AND token_id IS NOT NULL
+ORDER BY ts_ms ASC, id ASC
+LIMIT ?3
+"#,
+            )?;
+            let rows = stmt.query_map(
+                params![
+                    since_ts_ms,
+                    normalized_strategy,
+                    i64::try_from(limit.clamp(1, 10_000)).ok().unwrap_or(1_000),
+                ],
+                |row| {
+                    Ok(StrategyFillEventRecord {
+                        event_key: row.get(2)?,
+                        ts_ms: row.get(1)?,
+                        strategy_id: normalize_strategy_id(row.get::<_, String>(3)?.as_str()),
+                        condition_id: row.get(4)?,
+                        token_id: row.get(5)?,
+                        side: row.get(6)?,
+                        event_type: row.get(7)?,
                     })
                 },
             )?;

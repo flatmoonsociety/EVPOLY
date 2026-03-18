@@ -4,7 +4,8 @@ use crate::event_log::log_event;
 use crate::signal_state::SharedSignalState;
 use crate::strategy::{
     STRATEGY_ID_ENDGAME_SWEEP_V1, STRATEGY_ID_EVCURVE_V1, STRATEGY_ID_EVSNIPE_V1,
-    STRATEGY_ID_MM_REWARDS_V1, STRATEGY_ID_PREMARKET_V1, STRATEGY_ID_SESSIONBAND_V1,
+    STRATEGY_ID_MM_REWARDS_V1, STRATEGY_ID_MM_SPORT_V1, STRATEGY_ID_PREMARKET_V1,
+    STRATEGY_ID_SESSIONBAND_V1,
 };
 use crate::trader::Trader;
 use anyhow::{anyhow, Context, Result};
@@ -478,6 +479,20 @@ fn setting_specs() -> Vec<BotSettingSpec> {
             config_fallback_key: None,
             description: "Enable MM rewards strategy.",
         },
+        BotSettingSpec {
+            key: "EVPOLY_STRATEGY_MM_SPORT_ENABLE",
+            group: "strategy",
+            strategy: Some("mm_sport"),
+            value_type: BotSettingType::Bool,
+            default_raw: "false",
+            min: None,
+            max: None,
+            enum_values: &[],
+            mutable: true,
+            restart_required: true,
+            config_fallback_key: None,
+            description: "Enable MM Sport strategy.",
+        },
         // Risk
         BotSettingSpec {
             key: "EVPOLY_MAX_ENTRIES_PER_TIMEFRAME_PERIOD",
@@ -861,6 +876,11 @@ fn strategy_catalog() -> Vec<(&'static str, &'static str, &'static [&'static str
             &["mm", "mm_rewards", "mm_rewards_v1"],
         ),
         (
+            "mm_sport",
+            STRATEGY_ID_MM_SPORT_V1,
+            &["mm_sport", "mm_sport_v1", "sport", "mmsport"],
+        ),
+        (
             "sessionband",
             STRATEGY_ID_SESSIONBAND_V1,
             &["sessionband", "sessionband_v1"],
@@ -899,6 +919,7 @@ fn strategy_enable_key(strategy_slug: &str) -> Option<&'static str> {
         "sessionband" => Some("EVPOLY_STRATEGY_SESSIONBAND_ENABLE"),
         "evsnipe" => Some("EVPOLY_STRATEGY_EVSNIPE_ENABLE"),
         "mm" => Some("EVPOLY_STRATEGY_MM_REWARDS_ENABLE"),
+        "mm_sport" => Some("EVPOLY_STRATEGY_MM_SPORT_ENABLE"),
         _ => None,
     }
 }

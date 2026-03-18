@@ -2,8 +2,8 @@ use std::collections::HashMap;
 
 use crate::strategy::{
     Direction, Timeframe, STRATEGY_ID_ENDGAME_SWEEP_V1, STRATEGY_ID_EVCURVE_V1,
-    STRATEGY_ID_EVSNIPE_V1, STRATEGY_ID_MM_REWARDS_V1, STRATEGY_ID_PREMARKET_V1,
-    STRATEGY_ID_SESSIONBAND_V1,
+    STRATEGY_ID_EVSNIPE_V1, STRATEGY_ID_MM_REWARDS_V1, STRATEGY_ID_MM_SPORT_V1,
+    STRATEGY_ID_PREMARKET_V1, STRATEGY_ID_SESSIONBAND_V1,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,6 +62,10 @@ impl ArbiterConfig {
         per_strategy_max_usd.insert(
             STRATEGY_ID_MM_REWARDS_V1.to_string(),
             env_f64("EVPOLY_ARB_STRAT_MM_REWARDS_MAX_USD", global_max_usd).max(0.0),
+        );
+        per_strategy_max_usd.insert(
+            STRATEGY_ID_MM_SPORT_V1.to_string(),
+            env_f64("EVPOLY_ARB_STRAT_MM_SPORT_MAX_USD", global_max_usd).max(0.0),
         );
 
         let mut per_timeframe_max_usd = HashMap::new();
@@ -398,6 +402,7 @@ fn strategy_priority(strategy_id: &str) -> u8 {
         STRATEGY_ID_EVCURVE_V1 => 3,
         STRATEGY_ID_EVSNIPE_V1 => 4,
         STRATEGY_ID_MM_REWARDS_V1 => 5,
+        STRATEGY_ID_MM_SPORT_V1 => 6,
         _ => 9,
     }
 }

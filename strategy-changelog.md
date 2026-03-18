@@ -65,6 +65,13 @@ Older entries may reference env keys that were removed in later commits.
 - Uses local preflight gate before quote submission.
 - Uses quote refresh + scoped cancel/replace + refill-on-fill loop through arbiter/trader.
 
+### `mm_sport_v1`
+- Sports rewards market-making strategy (default disabled).
+- Discovers pregame sports match markets from rewards API + CLOB market details.
+- Quotes top-of-book on both sides per token (maker-only, post-only), no ladder.
+- Uses reward min-size floor with multiplier and a top-share ratio gate before quote placement.
+- Pauses a market for 15 minutes after any fill and cancels active market orders during pause.
+
 ## Change Log
 
 ### 2026-03-18
@@ -73,6 +80,14 @@ Older entries may reference env keys that were removed in later commits.
   - removed `EVPOLY_MM_CBB_*` env surface and CBB-only/piority selection hooks.
   - removed CBB candidate metadata plumbing (`is_cbb`) from MM rewards discovery/selection payloads.
   - MM rewards now runs without CBB-specific bypass/selection behavior.
+
+- Added new `mm_sport_v1` strategy runtime (`src/main.rs`, `src/mm/mod.rs`, `src/strategy.rs`, `src/tracking_db.rs`, `src/trader.rs`, `.env.example`, `.env.full.example`, `docs/strategy_combos.md`):
+  - new strategy toggle `EVPOLY_STRATEGY_MM_SPORT_ENABLE` (default `false`).
+  - new MM Sport env surface (`EVPOLY_MM_SPORT_*`) for poll cadence, discovery refresh, reward/day threshold, quote size multiplier, max top-share ratio, fill-pause duration, and market filters.
+  - discovery behavior: scans rewards markets, keeps sports pregame match markets only, requires reward-eligible params by default, and keeps rate/day `>= 300` by default.
+  - quoting behavior: top bid + top ask only (per token), maker-only (`post_only=true` hard-enforced), no ladder, with strict ratio gate `our_size / (existing_top + our_size) < max_share_ratio` for both sides; if either side fails gate, both sides are canceled/skipped.
+  - fill behavior: any `ENTRY_FILL` or `EXIT` event for `mm_sport_v1` pauses that market for `EVPOLY_MM_SPORT_PAUSE_AFTER_FILL_SEC` (default 900s), cancels active orders for that condition, and resumes after pause with inventory-adjusted ask sizing.
+  - tracking additions: `tracking_db.list_strategy_fill_events_since(...)` now exposes strategy-scoped fill stream (`ENTRY_FILL` + `EXIT`) used by MM Sport pause logic.
 
 ### 2026-03-17
 

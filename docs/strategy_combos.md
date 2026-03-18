@@ -1,7 +1,7 @@
 # Strategy Combo Guide
 
 ## Hard Rules
-- `mm_rewards_v1` should run alone.
+- `mm_rewards_v1` should run alone, except it may run with `mm_sport_v1`.
 - `endgame_sweep_v1` and `sessionband_v1` should not run together.
 
 ## Why
@@ -33,6 +33,10 @@
 ### Profile F: MM Rewards Solo
 - Enable: `mm_rewards_v1`
 - Disable: `premarket_v1`, `endgame_sweep_v1`, `evcurve_v1`, `sessionband_v1`, `evsnipe_v1`
+
+### Profile G: MM Rewards + MM Sport
+- Enable: `mm_rewards_v1`, `mm_sport_v1`
+- Disable (recommended): `premarket_v1`, `endgame_sweep_v1`, `evcurve_v1`, `sessionband_v1`, `evsnipe_v1`
 
 ## Example Toggle Set (MM Solo)
 ```bash
