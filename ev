@@ -17,6 +17,8 @@ RETENTION_SCRIPT="${EV_RETENTION_SCRIPT:-$ROOT_DIR/scripts/evpoly_retention_clea
 WALLET_SYNC_AUTOSTART="${EV_WALLET_SYNC_AUTOSTART:-1}"
 WALLET_SYNC_WORKER_SCRIPT="${EV_WALLET_SYNC_WORKER_SCRIPT:-$ROOT_DIR/scripts/wallet_sync_worker.sh}"
 AUTO_RESTART_SCRIPT="${EV_AUTO_RESTART_SCRIPT:-$ROOT_DIR/scripts/ev_auto_restart.sh}"
+AUTO_RESTART_ON_LIVE="${EV_AUTO_RESTART_ON_LIVE:-1}"
+AUTO_RESTART_LIVE_SCHEDULE="${EV_AUTO_RESTART_LIVE_SCHEDULE:-6h}"
 FORCE_REBUILD="${EV_FORCE_REBUILD:-0}"
 FAST_START="${EV_FAST_START:-0}"
 
@@ -50,6 +52,8 @@ Env overrides:
   EV_WALLET_SYNC_AUTOSTART (1/0)
   EV_WALLET_SYNC_WORKER_SCRIPT
   EV_AUTO_RESTART_SCRIPT
+  EV_AUTO_RESTART_ON_LIVE (1/0)
+  EV_AUTO_RESTART_LIVE_SCHEDULE (default: 6h)
 EOF
 }
 
@@ -414,16 +418,31 @@ autorestart_run_now() {
   "$AUTO_RESTART_SCRIPT"
 }
 
+maybe_enable_live_autorestart() {
+  local mode="${1:-live}"
+  if [[ "$AUTO_RESTART_ON_LIVE" == "0" ]]; then
+    return 0
+  fi
+  if [[ "${mode,,}" != "live" ]]; then
+    return 0
+  fi
+  autorestart_on "$AUTO_RESTART_LIVE_SCHEDULE"
+}
+
 main() {
   need_tmux
   local action="${1:-}"
   case "$action" in
     start)
-      start_session "${2:-live}"
+      local mode="${2:-live}"
+      start_session "$mode"
+      maybe_enable_live_autorestart "$mode"
       ;;
     restart)
+      local mode="${2:-live}"
       stop_session
-      start_session "${2:-live}"
+      start_session "$mode"
+      maybe_enable_live_autorestart "$mode"
       ;;
     stop)
       stop_session
