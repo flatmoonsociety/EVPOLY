@@ -120,6 +120,11 @@ Older entries may reference env keys that were removed in later commits.
   - added runtime safety guard: if any sports market still reaches the MM rewards execution loop, MM rewards skips it and strategy-scoped cancels `mm_rewards_v1` pending orders for that condition.
   - affects `mm_rewards_v1` only; cancellation path is strategy-scoped and does not touch `mm_sport_v1` orders.
 
+- `endgame_sweep_v1` arbiter worker defaults and fastlane submit dispatch were adjusted for 7-symbol concurrency (`src/main.rs`):
+  - default `EVPOLY_ENTRY_WORKER_COUNT_ENDGAME` fallback changed from `2` to `8` when env is unset.
+  - endgame fastlane submit path no longer blocks worker loop on `submit_task.await`; endgame requests now use spawned submit tasks like non-fastlane paths, while `sessionband_v1` keeps existing blocking fastlane behavior.
+  - affects endgame execution queueing/submit concurrency across enabled endgame symbols/timeframes by reducing per-worker head-of-line blocking under bursty tick windows.
+
 - `endgame_sweep_v1` proxy-source routing was hardcoded for the 7-symbol default universe (`src/main.rs`, `src/hyperliquid_wss.rs`, `src/lib.rs`):
   - `BNB` now uses Binance spot trade feed (`bnbusdt@trade`) for all enabled endgame timeframes.
   - `HYPE` now uses Hyperliquid spot trade feed (`HYPEUSDC`, hardcoded coin `@107`) for `5m/15m/4h`, and Binance trade feed for `1h`.

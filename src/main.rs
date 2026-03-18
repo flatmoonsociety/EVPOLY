@@ -3249,7 +3249,7 @@ async fn main() -> Result<()> {
     let worker_count_endgame = std::env::var("EVPOLY_ENTRY_WORKER_COUNT_ENDGAME")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(2)
+        .unwrap_or(8)
         .max(1);
     let worker_count_sessionband = std::env::var("EVPOLY_ENTRY_WORKER_COUNT_SESSIONBAND")
         .ok()
@@ -3385,6 +3385,8 @@ async fn main() -> Result<()> {
                         request.intent.strategy_id.as_str(),
                         STRATEGY_ID_ENDGAME_SWEEP_V1 | STRATEGY_ID_SESSIONBAND_V1
                     );
+                    let endgame_nonblocking_submit =
+                        request.intent.strategy_id == STRATEGY_ID_ENDGAME_SWEEP_V1;
                     let begin = {
                         let gate_wait_started = Instant::now();
                         let mut gate = worker_idempotency_for_exec.lock().await;
@@ -4146,7 +4148,7 @@ async fn main() -> Result<()> {
                             None,
                         );
                     };
-                    if fastlane_strategy {
+                    if fastlane_strategy && !endgame_nonblocking_submit {
                         submit_task.await;
                     } else {
                         tokio::spawn(submit_task);
