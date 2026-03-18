@@ -134,6 +134,10 @@ Older entries may reference env keys that were removed in later commits.
   - `endgame_proxy_source_for_symbol_timeframe(...)` now routes `DOGE` to Binance (`dogeusdt@trade`) for all enabled endgame timeframes.
   - removes Coinbase as the endgame proxy feed source for DOGE while preserving existing synthetic snapshot/planner interfaces.
 
+- Endgame/trader symbol attribution was corrected for `DOGE/BNB/HYPE` submit telemetry (`src/main.rs`, `src/trader.rs`):
+  - `entry_execution_timing.asset_symbol` now prefers symbol extraction from `request_id` (e.g. `...:doge:...`) instead of falling back to token-type family (`BTC/ETH/SOL/XRP` only).
+  - `trade_events.asset_symbol` now uses `reason.request_id` symbol fallback when token-type label cannot represent extended symbols, so endgame `ENTRY_SUBMIT` rows keep `DOGE/BNB/HYPE` attribution.
+
 - Shared timeframe slug helpers were extended for `DOGE/BNB/HYPE` (`src/main.rs` tests + helpers):
   - added normalize/slug-prefix/H1-D1 asset prefix handling so discovery validation accepts these symbols across `5m/15m/1h/4h` naming paths.
   - touched code paths: `normalize_market_symbol`, `market_symbol_slug_prefixes`, `h1_symbol_from_market_slug`, `h1_market_slug_matches_target_open_ts` fallback symbol set, and `h1_event_slug_asset_prefix`.

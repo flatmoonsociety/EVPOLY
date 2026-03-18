@@ -25671,7 +25671,9 @@ fn log_arbiter_request_timing(
         maybe_emit_late_guard_drop_alert(request);
     }
     let logical_key = logical_entry_key_from_request(request);
-    let symbol = token_family_for_token_type(&request.opportunity.token_type);
+    let symbol = asset_symbol_from_request_id(request.request_id.as_str()).unwrap_or_else(|| {
+        token_family_for_token_type(&request.opportunity.token_type).to_string()
+    });
     let timing = &request.timing;
     let decision_ts_ms = Some(timing.decision_ts_ms).filter(|v| *v > 0);
     let enqueue_ts_ms = timing.enqueue_ts_ms;
@@ -26576,6 +26578,26 @@ fn token_family_for_token_type(token_type: &crate::detector::TokenType) -> &'sta
         TokenType::SolanaUp | TokenType::SolanaDown => "SOL",
         TokenType::XrpUp | TokenType::XrpDown => "XRP",
     }
+}
+
+fn normalize_asset_symbol_segment(raw: &str) -> Option<&'static str> {
+    match raw.trim().to_ascii_uppercase().as_str() {
+        "BTC" | "BITCOIN" => Some("BTC"),
+        "ETH" | "ETHEREUM" => Some("ETH"),
+        "SOL" | "SOLANA" => Some("SOL"),
+        "XRP" => Some("XRP"),
+        "DOGE" | "DOGECOIN" => Some("DOGE"),
+        "BNB" => Some("BNB"),
+        "HYPE" => Some("HYPE"),
+        _ => None,
+    }
+}
+
+fn asset_symbol_from_request_id(request_id: &str) -> Option<String> {
+    request_id
+        .split(':')
+        .find_map(normalize_asset_symbol_segment)
+        .map(str::to_string)
 }
 
 fn token_type_for_asset_direction(

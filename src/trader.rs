@@ -3158,13 +3158,15 @@ impl Trader {
             return;
         };
 
+        let asset_symbol = Self::asset_symbol_from_reason_request_id(reason.as_deref())
+            .or_else(|| Self::asset_symbol_from_token_type_label(token_type.as_deref()));
         let row = TradeEventRecord {
             event_key,
             ts_ms: chrono::Utc::now().timestamp_millis(),
             period_timestamp,
             timeframe: Self::normalize_timeframe_label(timeframe),
             strategy_id: Self::normalize_strategy_id(strategy_id),
-            asset_symbol: Self::asset_symbol_from_token_type_label(token_type.as_deref()),
+            asset_symbol,
             condition_id,
             token_id,
             token_type,
@@ -4131,6 +4133,33 @@ impl Trader {
     fn asset_symbol_from_token_type_label(label: Option<&str>) -> Option<String> {
         let token_type = Self::parse_token_type_label(label?)?;
         Some(Self::token_family(&token_type).to_string())
+    }
+
+    fn normalize_asset_symbol(raw: &str) -> Option<&'static str> {
+        match raw.trim().to_ascii_uppercase().as_str() {
+            "BTC" | "BITCOIN" => Some("BTC"),
+            "ETH" | "ETHEREUM" => Some("ETH"),
+            "SOL" | "SOLANA" => Some("SOL"),
+            "XRP" => Some("XRP"),
+            "DOGE" | "DOGECOIN" => Some("DOGE"),
+            "BNB" => Some("BNB"),
+            "HYPE" => Some("HYPE"),
+            _ => None,
+        }
+    }
+
+    fn asset_symbol_from_request_id(request_id: &str) -> Option<String> {
+        request_id
+            .split(':')
+            .find_map(Self::normalize_asset_symbol)
+            .map(str::to_string)
+    }
+
+    fn asset_symbol_from_reason_request_id(reason: Option<&str>) -> Option<String> {
+        let reason = reason?;
+        let payload: Value = serde_json::from_str(reason).ok()?;
+        let request_id = payload.get("request_id")?.as_str()?;
+        Self::asset_symbol_from_request_id(request_id)
     }
 
     fn push_unique_restore_candidate(
