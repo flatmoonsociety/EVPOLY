@@ -77,6 +77,13 @@ Older entries may reference env keys that were removed in later commits.
 
 ### 2026-03-18
 
+- `mm_sport_v1` normal quoting now uses pair-depth regimes to avoid one-sided high-mult quotes when one outcome book is thinner (`src/main.rs`):
+  - computes external top-bid depth on both outcomes and uses pair minimum depth for regime selection.
+  - if pair depth `< 30,000 USD`: cancels both sides and skips quoting that market (keeps monitoring).
+  - if pair depth is `>= 30,000` and `< EVPOLY_MM_SPORT_MIN_TOP_DEPTH_USD` (default `100,000`): forces quote multiplier to hardcoded `1.2x` (code default).
+  - if pair depth is `>= EVPOLY_MM_SPORT_MIN_TOP_DEPTH_USD`: uses normal configured multiplier (`EVPOLY_MM_SPORT_QUOTE_SIZE_MULT`).
+  - normal per-side `100k` depth skip path was removed; depth gating is now pair-level before per-token ratio clamp.
+
 - Docs/env surface alignment for 7-symbol rollout (`.env.full.example`, `docs/endgame_sweep_v1.md`, `docs/evcurve_v1.md`, `docs/evsnipe_v1.md`, `README.md`, `AGENTS.md`):
   - `.env.full.example` now sets `EVPOLY_ENTRY_WORKER_COUNT_ENDGAME=8` to match runtime code default.
   - strategy guides now reflect 7-symbol defaults for endgame/evcurve/evsnipe (`BTC,ETH,SOL,XRP,DOGE,BNB,HYPE`) and updated symbol sizing notes.
