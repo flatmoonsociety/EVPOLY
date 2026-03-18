@@ -824,7 +824,7 @@ impl MmRewardsConfig {
             mode_enable_quiet_stack: true,
             mode_enable_tail_biased: true,
             mode_enable_spike: true,
-            mode_enable_sports_pregame: true,
+            mode_enable_sports_pregame: false,
             single_market_selectors,
             single_market_slug,
             single_market_match_slug,

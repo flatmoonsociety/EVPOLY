@@ -15635,6 +15635,69 @@ async fn main() -> Result<()> {
                             continue;
                         }
 
+                        if mm::reward_scanner::is_sports_market_runtime(
+                            market.slug.as_str(),
+                            market.question.as_str(),
+                        ) {
+                            let skip_key =
+                                format!("mm_rewards_skip_sports_market:{}", market.condition_id);
+                            let should_emit = last_skip_emit_ms
+                                .get(skip_key.as_str())
+                                .map(|last| now_ms.saturating_sub(*last) >= 10_000)
+                                .unwrap_or(true);
+                            if should_emit {
+                                last_skip_emit_ms.insert(skip_key.clone(), now_ms);
+                            }
+                            match trader_for_mm_rewards
+                                .cancel_pending_orders_for_strategy_condition(
+                                    STRATEGY_ID_MM_REWARDS_V1,
+                                    market.condition_id.as_str(),
+                                    "mm_rewards_sports_guard",
+                                )
+                                .await
+                            {
+                                Ok(canceled) => {
+                                    if canceled > 0 {
+                                        metrics.on_cancel();
+                                    }
+                                    if should_emit || canceled > 0 {
+                                        log_event(
+                                            "mm_rewards_skip_sports_market",
+                                            json!({
+                                                "strategy_id": STRATEGY_ID_MM_REWARDS_V1,
+                                                "source": market_source,
+                                                "mode": mode.as_str(),
+                                                "condition_id": market.condition_id,
+                                                "slug": market.slug,
+                                                "symbol": target.symbol,
+                                                "timeframe": target.timeframe.as_str(),
+                                                "canceled_orders": canceled
+                                            }),
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    if should_emit {
+                                        log_event(
+                                            "mm_rewards_skip_sports_market_cancel_error",
+                                            json!({
+                                                "strategy_id": STRATEGY_ID_MM_REWARDS_V1,
+                                                "source": market_source,
+                                                "mode": mode.as_str(),
+                                                "condition_id": market.condition_id,
+                                                "slug": market.slug,
+                                                "symbol": target.symbol,
+                                                "timeframe": target.timeframe.as_str(),
+                                                "error": e.to_string()
+                                            }),
+                                        );
+                                    }
+                                }
+                            }
+                            metrics.on_skip();
+                            continue;
+                        }
+
                         if let Some(keyword) = mm_market_blacklist_keyword_hit(
                             &market,
                             mm_cfg_for_loop.market_blacklist_keywords.as_slice(),

@@ -95,6 +95,12 @@ Older entries may reference env keys that were removed in later commits.
   - exit submissions enforce MM-rewards-style minimum exit floor (`max(exchange_min_shares, reward_min_shares)`), and undersized inventory is skipped with explicit telemetry.
   - affects `mm_sport_v1` only (all sports symbols/timeframes discovered by rewards feed); non-MM-sport strategies unchanged.
 
+- `mm_rewards_v1` now hard-excludes sports markets so MM Sport owns sports flow (`src/mm/mod.rs`, `src/mm/reward_scanner.rs`, `src/main.rs`):
+  - hard-disabled `sports_pregame` mode in runtime defaults (`mode_enable_sports_pregame=false`) with no env override path.
+  - auto candidate scan now rejects sports markets at source using market tags + slug classification before ranking/selection.
+  - added runtime safety guard: if any sports market still reaches the MM rewards execution loop, MM rewards skips it and strategy-scoped cancels `mm_rewards_v1` pending orders for that condition.
+  - affects `mm_rewards_v1` only; cancellation path is strategy-scoped and does not touch `mm_sport_v1` orders.
+
 ### 2026-03-17
 
 - `mm_rewards_v1` now enforces reward minimum share size on SELL/exit order paths when reward-min enforcement is enabled and the market side is reward-eligible (`src/main.rs`):

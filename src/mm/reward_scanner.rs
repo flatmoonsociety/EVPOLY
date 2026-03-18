@@ -175,6 +175,13 @@ pub async fn scan_rank_auto_candidates(
         if condition_key.is_empty() || !existing_conditions.insert(condition_key) {
             continue;
         }
+        if is_sports_market_details(
+            details.tags.as_slice(),
+            details.market_slug.as_str(),
+            row.market_slug.as_str(),
+        ) {
+            continue;
+        }
         if is_market_expired(&details, now_ms)
             || is_market_inside_exit_window(&details, now_ms, cfg.near_expiry_exit_window_sec)
         {
@@ -1061,29 +1068,61 @@ fn candidate_midpoint_hint(candidate: &AutoMarketCandidate) -> f64 {
     }
 }
 
-fn is_sports_market_slug(slug: &str) -> bool {
-    let normalized = slug.to_ascii_lowercase();
-    let sports_tokens = [
-        "nba",
-        "nfl",
-        "mlb",
-        "nhl",
-        "epl",
-        "serie-a",
-        "la-liga",
-        "champions-league",
-        "ncaa",
-        "world-cup",
-        "super-bowl",
-        "match",
-        "game",
-        "vs-",
-        "-vs-",
-        "playoff",
-        "cup-",
-        "final-",
-    ];
-    sports_tokens.iter().any(|token| normalized.contains(token))
+fn is_sports_tag(tag: &str) -> bool {
+    let normalized = tag.trim().to_ascii_lowercase();
+    normalized == "sports"
+        || normalized.starts_with("sport")
+        || normalized.contains("sports")
+        || normalized.contains("basketball")
+        || normalized.contains("football")
+        || normalized.contains("baseball")
+        || normalized.contains("hockey")
+        || normalized.contains("soccer")
+        || normalized.contains("tennis")
+        || normalized.contains("mma")
+        || normalized.contains("golf")
+        || normalized.contains("ufc")
+}
+
+pub fn is_sports_market_slug(slug: &str) -> bool {
+    let normalized = slug.trim().to_ascii_lowercase();
+    normalized.starts_with("sports/")
+        || normalized.starts_with("sports-")
+        || normalized.contains("/sports/")
+        || normalized.contains("/sports-")
+        || normalized.starts_with("cbb-")
+        || normalized.starts_with("nba-")
+        || normalized.starts_with("wnba-")
+        || normalized.starts_with("nfl-")
+        || normalized.starts_with("mlb-")
+        || normalized.starts_with("nhl-")
+        || normalized.starts_with("ncaab-")
+        || normalized.starts_with("ncaaf-")
+        || normalized.starts_with("epl-")
+        || normalized.starts_with("ufc-")
+        || normalized.contains("champions-league")
+        || normalized.contains("world-cup")
+        || normalized.contains("super-bowl")
+        || normalized.contains("-playoff")
+        || normalized.contains("-vs-")
+        || normalized.contains("/vs-")
+}
+
+pub fn is_sports_market_details(tags: &[String], primary_slug: &str, fallback_slug: &str) -> bool {
+    tags.iter().any(|tag| is_sports_tag(tag.as_str()))
+        || is_sports_market_slug(primary_slug)
+        || is_sports_market_slug(fallback_slug)
+}
+
+pub fn is_sports_market_runtime(slug: &str, question: &str) -> bool {
+    if is_sports_market_slug(slug) {
+        return true;
+    }
+    let question_lc = question.trim().to_ascii_lowercase();
+    question_lc.contains(" vs. ")
+        || question_lc.contains(" vs ")
+        || question_lc.contains(" v. ")
+        || question_lc.contains(" v ")
 }
 
 fn mode_fit_score(mode: MmMode, candidate: &AutoMarketCandidate, reward_p75: f64) -> f64 {
@@ -1536,5 +1575,51 @@ fn extract_max_numeric(root: Option<&serde_json::Value>) -> Option<f64> {
         Some(max_seen)
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sports_market_details_detection_uses_tags_and_slugs() {
+        let tags = vec!["College Basketball".to_string()];
+        assert!(is_sports_market_details(
+            tags.as_slice(),
+            "random-slug",
+            "fallback-slug"
+        ));
+        assert!(is_sports_market_details(
+            &[],
+            "nba-lakers-vs-celtics",
+            "fallback-slug"
+        ));
+        assert!(is_sports_market_details(
+            &[],
+            "random-slug",
+            "sports/cbb/games"
+        ));
+        assert!(!is_sports_market_details(
+            &[],
+            "bitcoin-up-or-down-march-18-9pm-et",
+            "bitcoin-up-or-down-march-18-9pm-et"
+        ));
+    }
+
+    #[test]
+    fn sports_runtime_detection_checks_slug_or_vs_question() {
+        assert!(is_sports_market_runtime(
+            "nfl-bills-vs-jets",
+            "Who will win?"
+        ));
+        assert!(is_sports_market_runtime(
+            "generic-slug",
+            "Howard Bison vs. UMBC Retrievers"
+        ));
+        assert!(!is_sports_market_runtime(
+            "bitcoin-up-or-down-march-18-9pm-et",
+            "Will Bitcoin close above $85,000?"
+        ));
     }
 }
