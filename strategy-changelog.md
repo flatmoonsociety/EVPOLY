@@ -69,11 +69,6 @@ Older entries may reference env keys that were removed in later commits.
 
 ### 2026-03-17
 
-- `mm_rewards_v1` now supports enforced CBB-only execution scope via `EVPOLY_MM_CBB_ONLY_ENABLE` (`src/mm/mod.rs`, `src/main.rs`):
-  - MM auto candidate set is filtered to `is_cbb=true` before remote selection.
-  - runtime work-item loop now hard-skips non-CBB markets (including inventory-janitor sourced items), preventing quote/replace activity outside CBB when enabled.
-  - affects MM rewards mode scheduling/selection across all timeframes by turning CBB priority from additive behavior into strict CBB-only scope when the flag is set.
-
 - `mm_rewards_v1` now enforces reward minimum share size on SELL/exit order paths when reward-min enforcement is enabled and the market side is reward-eligible (`src/main.rs`):
   - weak-exit sell replacement and inventory-reduction sell paths now compute `min_exit_shares` as `max(exchange_min_shares, reward_min_shares_with_policy)` instead of exchange floor only.
   - this keeps CBB/MM-reward exit quotes at reward-qualifying share size (including inventory unwind/rebalance ladders), avoiding sub-min-size SELL quotes that forfeit rewards.
