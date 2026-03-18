@@ -76,6 +76,12 @@ Older entries may reference env keys that were removed in later commits.
 
 ### 2026-03-18
 
+- `mm_sport_v1` quoting/execution behavior updated to reduce one-sided SELL failures and align post-fill sizing (`src/main.rs`):
+  - normal quoting path now uses BUY-only on both outcomes (no literal SELL in normal mode).
+  - post-fill resume sizing now boosts the opposite outcome BUY size by held inventory (`desired_buy = base_quote + opposite_inventory`), e.g. if A fills, B quote grows after pause.
+  - condition-level guard now cancels all active MM Sport orders for the condition when either outcome fails quote validity/rate gate or when BUY placement fails, preventing mixed one-leg states.
+  - literal SELL remains in the prestart inventory-exit window only (60 minutes before game start), preserving exit behavior while eliminating normal-mode SELL spam.
+
 - `mm_rewards_v1` CBB priority/only paths were removed from runtime (`src/main.rs`, `src/mm/mod.rs`, `src/mm/reward_scanner.rs`, `src/bin/alpha_service.rs`, `.env.example`, `.env.full.example`, `docs/mm_rewards_v1.md`):
   - removed `EVPOLY_MM_CBB_*` env surface and CBB-only/piority selection hooks.
   - removed CBB candidate metadata plumbing (`is_cbb`) from MM rewards discovery/selection payloads.

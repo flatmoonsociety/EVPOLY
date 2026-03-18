@@ -976,6 +976,10 @@ fn mm_sport_size_shares_from_pending(row: &PendingOrderRecord) -> Option<f64> {
     (shares.is_finite() && shares > 0.0).then_some(shares)
 }
 
+fn mm_sport_desired_buy_shares(base_shares: f64, opposite_inventory_surplus: f64) -> f64 {
+    base_shares.max(0.0) + opposite_inventory_surplus.max(0.0)
+}
+
 fn mm_sport_order_matches_target(
     row: &PendingOrderRecord,
     target_price: f64,
@@ -1026,6 +1030,35 @@ async fn mm_sport_cancel_pending_rows(
         canceled = canceled.saturating_add(1);
     }
     canceled
+}
+
+async fn mm_sport_cancel_condition_orders(
+    api: &PolymarketApi,
+    tracking_db: &TrackingDb,
+    condition_id: &str,
+) -> usize {
+    let trimmed = condition_id.trim();
+    if trimmed.is_empty() {
+        return 0;
+    }
+    let rows = match tracking_db.list_active_pending_orders() {
+        Ok(rows) => rows,
+        Err(_) => return 0,
+    };
+    let scoped = rows
+        .into_iter()
+        .filter(|row| {
+            row.strategy_id
+                .eq_ignore_ascii_case(STRATEGY_ID_MM_SPORT_V1)
+        })
+        .filter(|row| {
+            row.condition_id
+                .as_deref()
+                .map(|cid| cid.eq_ignore_ascii_case(trimmed))
+                .unwrap_or(false)
+        })
+        .collect::<Vec<_>>();
+    mm_sport_cancel_pending_rows(api, tracking_db, scoped.as_slice()).await
 }
 
 async fn mm_sport_place_order(
@@ -12687,7 +12720,7 @@ async fn main() -> Result<()> {
                         }
                     }
 
-                    for market in &discovered_markets {
+                    'mm_sport_market_loop: for market in &discovered_markets {
                         let prestart_exit_mode =
                             mm_sport_prestart_exit_mode(now_ms, market.game_start_ts_ms);
                         if mm_sport_cfg_for_loop.pregame_only && market.game_start_ts_ms <= now_ms {
@@ -12756,25 +12789,25 @@ async fn main() -> Result<()> {
                                 .cloned()
                                 .collect::<Vec<_>>();
 
-                            let (best_bid, best_ask, best_bid_size, best_ask_size) =
+                            let (best_bid, best_ask, best_bid_size, _best_ask_size) =
                                 best_bid_ask_sizes_from_orderbook(book);
                             let Some(best_bid) = best_bid else {
-                                let _ = mm_sport_cancel_pending_rows(
+                                let _ = mm_sport_cancel_condition_orders(
                                     &api_for_mm_sport,
                                     &tracking_db_for_mm_sport,
-                                    &token_rows,
+                                    market.condition_id.as_str(),
                                 )
                                 .await;
-                                continue;
+                                continue 'mm_sport_market_loop;
                             };
                             let Some(best_ask) = best_ask else {
-                                let _ = mm_sport_cancel_pending_rows(
+                                let _ = mm_sport_cancel_condition_orders(
                                     &api_for_mm_sport,
                                     &tracking_db_for_mm_sport,
-                                    &token_rows,
+                                    market.condition_id.as_str(),
                                 )
                                 .await;
-                                continue;
+                                continue 'mm_sport_market_loop;
                             };
                             if !best_bid.is_finite()
                                 || !best_ask.is_finite()
@@ -12782,13 +12815,13 @@ async fn main() -> Result<()> {
                                 || best_ask <= 0.0
                                 || best_ask <= best_bid
                             {
-                                let _ = mm_sport_cancel_pending_rows(
+                                let _ = mm_sport_cancel_condition_orders(
                                     &api_for_mm_sport,
                                     &tracking_db_for_mm_sport,
-                                    &token_rows,
+                                    market.condition_id.as_str(),
                                 )
                                 .await;
-                                continue;
+                                continue 'mm_sport_market_loop;
                             }
 
                             let base_shares = (market.reward_min_size_shares
@@ -12801,6 +12834,17 @@ async fn main() -> Result<()> {
                                 .max(0.0);
                             let buy_key = format!("{}:{}:BUY", market.condition_id, token_id);
                             let sell_key = format!("{}:{}:SELL", market.condition_id, token_id);
+                            let opposite_token_id =
+                                if token_id.eq_ignore_ascii_case(market.up_token_id.as_str()) {
+                                    market.down_token_id.as_str()
+                                } else {
+                                    market.up_token_id.as_str()
+                                };
+                            let opposite_inventory_surplus = inventory_by_token
+                                .get(opposite_token_id)
+                                .copied()
+                                .unwrap_or(0.0)
+                                .max(0.0);
                             let now_ms_local = chrono::Utc::now().timestamp_millis();
                             let can_buy_action = last_action_ms_by_token_side
                                 .get(buy_key.as_str())
@@ -12982,20 +13026,21 @@ async fn main() -> Result<()> {
                                 continue;
                             }
 
-                            let desired_bid_shares = base_shares;
-                            let desired_ask_shares = base_shares + inventory_surplus;
-                            if !desired_bid_shares.is_finite()
-                                || !desired_ask_shares.is_finite()
-                                || desired_bid_shares <= 0.0
-                                || desired_ask_shares <= 0.0
-                            {
-                                let _ = mm_sport_cancel_pending_rows(
+                            // Normal MM Sport behavior is two-outcome BUY quoting.
+                            // Inventory from one outcome boosts the opposite BUY size
+                            // after pause/resume (e.g. A fill => quote extra on B).
+                            let desired_bid_shares = mm_sport_desired_buy_shares(
+                                base_shares,
+                                opposite_inventory_surplus,
+                            );
+                            if !desired_bid_shares.is_finite() || desired_bid_shares <= 0.0 {
+                                let _ = mm_sport_cancel_condition_orders(
                                     &api_for_mm_sport,
                                     &tracking_db_for_mm_sport,
-                                    &token_rows,
+                                    market.condition_id.as_str(),
                                 )
                                 .await;
-                                continue;
+                                continue 'mm_sport_market_loop;
                             }
 
                             let own_top_bid_shares = buy_rows
@@ -13009,43 +13054,34 @@ async fn main() -> Result<()> {
                                 })
                                 .filter_map(mm_sport_size_shares_from_pending)
                                 .sum::<f64>();
-                            let own_top_ask_shares = sell_rows
-                                .iter()
-                                .filter(|row| {
-                                    mm_sport_price_close(
-                                        row.price,
-                                        best_ask,
-                                        market.minimum_tick_size,
-                                    )
-                                })
-                                .filter_map(mm_sport_size_shares_from_pending)
-                                .sum::<f64>();
                             let ext_top_bid_shares =
                                 (best_bid_size.unwrap_or(0.0) - own_top_bid_shares).max(0.0);
-                            let ext_top_ask_shares =
-                                (best_ask_size.unwrap_or(0.0) - own_top_ask_shares).max(0.0);
                             let bid_ratio =
                                 desired_bid_shares / (ext_top_bid_shares + desired_bid_shares);
-                            let ask_ratio =
-                                desired_ask_shares / (ext_top_ask_shares + desired_ask_shares);
 
                             if !bid_ratio.is_finite()
-                                || !ask_ratio.is_finite()
                                 || bid_ratio >= mm_sport_cfg_for_loop.max_share_ratio
-                                || ask_ratio >= mm_sport_cfg_for_loop.max_share_ratio
                             {
+                                let _ = mm_sport_cancel_condition_orders(
+                                    &api_for_mm_sport,
+                                    &tracking_db_for_mm_sport,
+                                    market.condition_id.as_str(),
+                                )
+                                .await;
+                                continue 'mm_sport_market_loop;
+                            }
+
+                            if !sell_rows.is_empty() && can_sell_action {
                                 let _ = mm_sport_cancel_pending_rows(
                                     &api_for_mm_sport,
                                     &tracking_db_for_mm_sport,
-                                    &token_rows,
+                                    sell_rows.as_slice(),
                                 )
                                 .await;
-                                continue;
+                                last_action_ms_by_token_side.insert(sell_key.clone(), now_ms_local);
                             }
 
                             let desired_bid_usd = desired_bid_shares * best_bid;
-                            let desired_ask_usd = desired_ask_shares * best_ask;
-
                             let mut keep_buy_id: Option<String> = None;
                             let mut buy_cancel_rows = Vec::new();
                             for row in &buy_rows {
@@ -13064,24 +13100,6 @@ async fn main() -> Result<()> {
                                 }
                             }
 
-                            let mut keep_sell_id: Option<String> = None;
-                            let mut sell_cancel_rows = Vec::new();
-                            for row in &sell_rows {
-                                if keep_sell_id.is_none()
-                                    && mm_sport_order_matches_target(
-                                        row,
-                                        best_ask,
-                                        desired_ask_usd,
-                                        market.minimum_tick_size,
-                                        mm_sport_cfg_for_loop.size_requote_delta_pct,
-                                    )
-                                {
-                                    keep_sell_id = Some(row.order_id.clone());
-                                } else {
-                                    sell_cancel_rows.push(row.clone());
-                                }
-                            }
-
                             if !buy_cancel_rows.is_empty() && can_buy_action {
                                 let _ = mm_sport_cancel_pending_rows(
                                     &api_for_mm_sport,
@@ -13091,16 +13109,6 @@ async fn main() -> Result<()> {
                                 .await;
                                 last_action_ms_by_token_side.insert(buy_key.clone(), now_ms_local);
                                 keep_buy_id = None;
-                            }
-                            if !sell_cancel_rows.is_empty() && can_sell_action {
-                                let _ = mm_sport_cancel_pending_rows(
-                                    &api_for_mm_sport,
-                                    &tracking_db_for_mm_sport,
-                                    sell_cancel_rows.as_slice(),
-                                )
-                                .await;
-                                last_action_ms_by_token_side.insert(sell_key.clone(), now_ms_local);
-                                keep_sell_id = None;
                             }
 
                             if keep_buy_id.is_none() && can_buy_action {
@@ -13134,61 +13142,13 @@ async fn main() -> Result<()> {
                                                 "error": e.to_string()
                                             }),
                                         );
-                                    }
-                                }
-                            }
-
-                            if keep_sell_id.is_none() && can_sell_action {
-                                let allowance_refresh_ms = i64::try_from(
-                                    mm_sport_cfg_for_loop
-                                        .allowance_refresh_sec
-                                        .saturating_mul(1_000),
-                                )
-                                .ok()
-                                .unwrap_or(60_000);
-                                let allowance_due = last_allowance_refresh_ms_by_token
-                                    .get(token_id)
-                                    .map(|last| {
-                                        now_ms_local.saturating_sub(*last) >= allowance_refresh_ms
-                                    })
-                                    .unwrap_or(true);
-                                if allowance_due {
-                                    let _ = api_for_mm_sport
-                                        .update_balance_allowance_for_sell(token_id)
+                                        let _ = mm_sport_cancel_condition_orders(
+                                            &api_for_mm_sport,
+                                            &tracking_db_for_mm_sport,
+                                            market.condition_id.as_str(),
+                                        )
                                         .await;
-                                    last_allowance_refresh_ms_by_token
-                                        .insert(token_id.to_string(), now_ms_local);
-                                }
-                                match mm_sport_place_order(
-                                    &api_for_mm_sport,
-                                    &tracking_db_for_mm_sport,
-                                    market,
-                                    token_id,
-                                    "SELL",
-                                    best_ask,
-                                    desired_ask_shares,
-                                    mm_sport_cfg_for_loop.post_only,
-                                    now_ms_local,
-                                )
-                                .await
-                                {
-                                    Ok(Some(_)) => {
-                                        last_action_ms_by_token_side
-                                            .insert(sell_key.clone(), now_ms_local);
-                                    }
-                                    Ok(None) => {}
-                                    Err(e) => {
-                                        log_event(
-                                            "mm_sport_place_sell_failed",
-                                            json!({
-                                                "strategy_id": STRATEGY_ID_MM_SPORT_V1,
-                                                "condition_id": market.condition_id,
-                                                "token_id": token_id,
-                                                "price": best_ask,
-                                                "size_shares": desired_ask_shares,
-                                                "error": e.to_string()
-                                            }),
-                                        );
+                                        continue 'mm_sport_market_loop;
                                     }
                                 }
                             }
@@ -30072,6 +30032,13 @@ mod tests {
             game_start_ts_ms,
             game_start_ts_ms
         ));
+    }
+
+    #[test]
+    fn mm_sport_buy_size_boosts_opposite_outcome_after_fill_pause() {
+        assert!((mm_sport_desired_buy_shares(1200.0, 0.0) - 1200.0).abs() < 1e-9);
+        assert!((mm_sport_desired_buy_shares(1200.0, 1000.0) - 2200.0).abs() < 1e-9);
+        assert!((mm_sport_desired_buy_shares(1200.0, -50.0) - 1200.0).abs() < 1e-9);
     }
 
     #[test]
