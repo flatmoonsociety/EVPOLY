@@ -14703,8 +14703,6 @@ async fn main() -> Result<()> {
                             continue;
                         }
                         let is_cbb_priority_market = cbb_priority_scope && is_cbb_market;
-                        let cbb_reprice_priority_scope =
-                            mm_cfg_for_loop.cbb_priority_enable && is_cbb_market;
                         let cbb_priority_bypass_filters = is_cbb_priority_market
                             && mm_cfg_for_loop.cbb_priority_enable
                             && mm_cfg_for_loop.cbb_priority_bypass_filters;
@@ -19701,7 +19699,7 @@ async fn main() -> Result<()> {
                                         .ok()
                                         .unwrap_or(300)
                                         .max(50);
-                                let cbb_priority_min_rest_ms = if cbb_reprice_priority_scope {
+                                let cbb_priority_min_rest_ms = if is_cbb_priority_market {
                                     mm_cfg_for_loop
                                         .cbb_priority_min_rest_ms
                                         .max(base_reprice_ms)
@@ -19799,8 +19797,7 @@ async fn main() -> Result<()> {
                                             "normal_top_reprice_min_rest_ms": mm_cfg_for_loop.normal_top_reprice_min_rest_ms,
                                             "normal_top_reprice_cooldown_ms": mm_cfg_for_loop.normal_top_reprice_cooldown_ms,
                                             "cbb_priority_scope": is_cbb_priority_market,
-                                            "cbb_reprice_scope": cbb_reprice_priority_scope,
-                                            "cbb_priority_min_rest_ms": if cbb_reprice_priority_scope { Some(mm_cfg_for_loop.cbb_priority_min_rest_ms) } else { None::<i64> },
+                                            "cbb_priority_min_rest_ms": if is_cbb_priority_market { Some(mm_cfg_for_loop.cbb_priority_min_rest_ms) } else { None::<i64> },
                                             "conserve_active": conserve_active,
                                             "conserve_active_effective": conserve_active_effective,
                                             "conserve_actions_enable": mm_cfg_for_loop.conserve_actions_enable,
