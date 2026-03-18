@@ -25,7 +25,6 @@ pub struct AutoMarketCandidate {
     pub symbol: String,
     pub timeframe: Timeframe,
     pub timeframe_inferred: bool,
-    pub is_cbb: bool,
     pub reward_snapshot: MarketRewardSnapshot,
     pub best_bid_up: Option<f64>,
     pub best_ask_up: Option<f64>,
@@ -383,13 +382,11 @@ pub async fn scan_rank_auto_candidates(
             * depth_mult;
         let inferred_tf = infer_timeframe_from_slug(market.slug.as_str());
         let timeframe = inferred_tf.unwrap_or(Timeframe::D1);
-        let is_cbb = is_cbb_market_slug(market.slug.as_str());
         ranked.push(AutoMarketCandidate {
             symbol: infer_symbol(&market),
             market,
             timeframe,
             timeframe_inferred: inferred_tf.is_some(),
-            is_cbb,
             reward_snapshot,
             best_bid_up,
             best_ask_up,
@@ -510,7 +507,6 @@ pub async fn seed_auto_candidates_from_rewards_feed(
             symbol,
             timeframe,
             timeframe_inferred: inferred_tf.is_some(),
-            is_cbb: is_cbb_market_slug(details.market_slug.as_str()),
             reward_snapshot,
             best_bid_up: None,
             best_ask_up: None,
@@ -1068,9 +1064,6 @@ fn candidate_midpoint_hint(candidate: &AutoMarketCandidate) -> f64 {
 fn is_sports_market_slug(slug: &str) -> bool {
     let normalized = slug.to_ascii_lowercase();
     let sports_tokens = [
-        "cbb",
-        "ncaab",
-        "march-madness",
         "nba",
         "nfl",
         "mlb",
@@ -1512,14 +1505,6 @@ fn infer_symbol(market: &Market) -> String {
     } else {
         "MISC".to_string()
     }
-}
-
-fn is_cbb_market_slug(slug: &str) -> bool {
-    let normalized = slug.trim().to_ascii_lowercase();
-    normalized.starts_with("cbb-")
-        || normalized.contains("/cbb-")
-        || normalized.contains("ncaab")
-        || normalized.contains("march-madness")
 }
 
 fn extract_max_numeric(root: Option<&serde_json::Value>) -> Option<f64> {

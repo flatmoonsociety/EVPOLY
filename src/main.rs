@@ -13413,74 +13413,6 @@ async fn main() -> Result<()> {
                                             )
                                         }
                                     };
-                                let mut cbb_priority_selected_count = 0usize;
-                                let mut cbb_priority_mode_applied: Option<MmMode> = None;
-                                if mm_cfg_for_loop.cbb_priority_enable && !enabled_modes.is_empty()
-                                {
-                                    let cbb_priority_mode = enabled_modes
-                                        .iter()
-                                        .copied()
-                                        .find(|mode| *mode == MmMode::SportsPregame)
-                                        .or_else(|| enabled_modes.first().copied());
-                                    if let Some(priority_mode) = cbb_priority_mode {
-                                        let cbb_max =
-                                            mm_cfg_for_loop.cbb_priority_max_markets.max(1);
-                                        let min_reward =
-                                            mm_cfg_for_loop.cbb_priority_min_reward_rate_hint;
-                                        let mut cbb_priority_candidates = eligible_ranked
-                                            .iter()
-                                            .filter(|candidate| candidate.is_cbb)
-                                            .filter(|candidate| {
-                                                candidate.reward_snapshot.reward_daily_rate
-                                                    >= min_reward
-                                            })
-                                            .take(cbb_max)
-                                            .cloned()
-                                            .collect::<Vec<_>>();
-                                        if !cbb_priority_candidates.is_empty() {
-                                            let entry =
-                                                fresh_by_mode.entry(priority_mode).or_default();
-                                            cbb_priority_candidates.extend(entry.drain(..));
-                                            let mut merged = Vec::new();
-                                            let mut seen_conditions =
-                                                std::collections::HashSet::<String>::new();
-                                            for candidate in cbb_priority_candidates {
-                                                let condition_key = candidate
-                                                    .market
-                                                    .condition_id
-                                                    .trim()
-                                                    .to_ascii_lowercase();
-                                                if condition_key.is_empty()
-                                                    || !seen_conditions.insert(condition_key)
-                                                {
-                                                    continue;
-                                                }
-                                                merged.push(candidate);
-                                            }
-                                            let keep_cap = selection_pool.max(cbb_max);
-                                            if merged.len() > keep_cap {
-                                                merged.truncate(keep_cap);
-                                            }
-                                            cbb_priority_selected_count =
-                                                merged.iter().filter(|row| row.is_cbb).count();
-                                            cbb_priority_mode_applied = Some(priority_mode);
-                                            *entry = merged;
-                                        }
-                                    }
-                                }
-                                if cbb_priority_selected_count > 0 {
-                                    log_event(
-                                        "mm_rewards_cbb_priority_selected",
-                                        json!({
-                                            "strategy_id": STRATEGY_ID_MM_REWARDS_V1,
-                                            "selected_count": cbb_priority_selected_count,
-                                            "selection_pool": selection_pool,
-                                            "cbb_priority_max_markets": mm_cfg_for_loop.cbb_priority_max_markets,
-                                            "cbb_priority_min_reward_rate_hint": mm_cfg_for_loop.cbb_priority_min_reward_rate_hint,
-                                            "mode": cbb_priority_mode_applied.map(|mode| mode.as_str())
-                                        }),
-                                    );
-                                }
                                 let mut next_auto_active: std::collections::HashMap<
                                     MmMode,
                                     Vec<MmAutoActiveSlot>,
@@ -13715,7 +13647,6 @@ async fn main() -> Result<()> {
                                                     "slot": idx + 1,
                                                     "condition_id": candidate.market.condition_id,
                                                     "slug": candidate.market.slug,
-                                                    "is_cbb": candidate.is_cbb,
                                                     "symbol": candidate.symbol,
                                                     "timeframe": candidate.timeframe.as_str(),
                                                     "reward_rate_hint": candidate.reward_snapshot.reward_daily_rate,
@@ -13737,7 +13668,6 @@ async fn main() -> Result<()> {
                                                 "slot": idx + 1,
                                                 "condition_id": candidate.market.condition_id,
                                                 "slug": candidate.market.slug,
-                                                "is_cbb": candidate.is_cbb,
                                                 "symbol": candidate.symbol,
                                                 "timeframe": candidate.timeframe.as_str(),
                                                 "timeframe_inferred": candidate.timeframe_inferred,
@@ -14317,7 +14247,6 @@ async fn main() -> Result<()> {
                         Option<mm::MmModeTarget>,
                         bool,
                         bool,
-                        bool,
                     )> = Vec::new();
                     for (mode, selector, target_override) in &mm_forced_inventory_selectors {
                         let effective_mode = if mm_cfg_for_loop.mode_enabled(*mode) {
@@ -14346,7 +14275,6 @@ async fn main() -> Result<()> {
                             target_override.clone(),
                             true,
                             false,
-                            false,
                         ));
                     }
                     if auto_mode_requested {
@@ -14370,8 +14298,6 @@ async fn main() -> Result<()> {
                                         );
                                         continue;
                                     }
-                                    let is_cbb_priority_candidate =
-                                        mm_cfg_for_loop.cbb_priority_enable && candidate.is_cbb;
                                     mode_work_items.push((
                                         mode,
                                         None,
@@ -14379,7 +14305,6 @@ async fn main() -> Result<()> {
                                         None,
                                         false,
                                         false,
-                                        is_cbb_priority_candidate,
                                     ));
                                 }
                             }
@@ -14389,8 +14314,6 @@ async fn main() -> Result<()> {
                                 for candidate in
                                     candidates.iter().map(|slot| slot.candidate.clone())
                                 {
-                                    let is_cbb_priority_candidate =
-                                        mm_cfg_for_loop.cbb_priority_enable && candidate.is_cbb;
                                     mode_work_items.push((
                                         mode,
                                         None,
@@ -14398,7 +14321,6 @@ async fn main() -> Result<()> {
                                         None,
                                         false,
                                         true,
-                                        is_cbb_priority_candidate,
                                     ));
                                 }
                             }
@@ -14411,7 +14333,6 @@ async fn main() -> Result<()> {
                                 Some(selector.clone()),
                                 None,
                                 None,
-                                false,
                                 false,
                                 false,
                             ));
@@ -14432,7 +14353,6 @@ async fn main() -> Result<()> {
                         target_override,
                         forced_inventory_scope,
                         forced_reward_scope,
-                        cbb_priority_scope,
                     ) in mode_work_items
                     {
                         let is_single_target_item = !forced_inventory_scope
@@ -14496,8 +14416,6 @@ async fn main() -> Result<()> {
                                         "competition_qmin_est": candidate.competition_qmin_est,
                                         "avg_spread": candidate.avg_spread,
                                         "rv_short_bps": candidate.rv_short_bps,
-                                        "is_cbb": candidate.is_cbb,
-                                        "cbb_priority_scope": cbb_priority_scope,
                                         "forced_include": forced_reward_scope,
                                         "forced_include_reason": if forced_reward_scope { Some("reward_above_force_threshold") } else { None::<&str> },
                                         "auto_force_include_reward_min": mm_cfg_for_loop.auto_force_include_reward_min
@@ -14649,20 +14567,6 @@ async fn main() -> Result<()> {
                         let Some(target) = target else {
                             continue;
                         };
-                        let is_cbb_market = auto_candidate_for_mode
-                            .as_ref()
-                            .map(|candidate| candidate.is_cbb)
-                            .unwrap_or_else(|| {
-                                let slug = market.slug.trim().to_ascii_lowercase();
-                                slug.starts_with("cbb-")
-                                    || slug.contains("/cbb-")
-                                    || slug.contains("ncaab")
-                                    || slug.contains("march-madness")
-                            });
-                        let is_cbb_priority_market = cbb_priority_scope && is_cbb_market;
-                        let cbb_priority_bypass_filters = is_cbb_priority_market
-                            && mm_cfg_for_loop.cbb_priority_enable
-                            && mm_cfg_for_loop.cbb_priority_bypass_filters;
 
                         if !processed_condition_ids.insert(market.condition_id.clone()) {
                             log_event(
@@ -14685,40 +14589,22 @@ async fn main() -> Result<()> {
                             &market,
                             mm_cfg_for_loop.market_blacklist_keywords.as_slice(),
                         ) {
-                            if cbb_priority_bypass_filters {
-                                log_event(
-                                    "mm_rewards_cbb_priority_filter_bypass",
-                                    json!({
-                                        "strategy_id": STRATEGY_ID_MM_REWARDS_V1,
-                                        "source": market_source,
-                                        "mode": mode.as_str(),
-                                        "condition_id": market.condition_id,
-                                        "slug": market.slug,
-                                        "symbol": target.symbol,
-                                        "timeframe": target.timeframe.as_str(),
-                                        "filter": "market_blacklist",
-                                        "keyword": keyword,
-                                        "cbb_priority_scope": is_cbb_priority_market
-                                    }),
-                                );
-                            } else {
-                                log_event(
-                                    "mm_rewards_skip_blacklisted_market",
-                                    json!({
-                                        "strategy_id": STRATEGY_ID_MM_REWARDS_V1,
-                                        "source": market_source,
-                                        "mode": mode.as_str(),
-                                        "condition_id": market.condition_id,
-                                        "slug": market.slug,
-                                        "symbol": target.symbol,
-                                        "timeframe": target.timeframe.as_str(),
-                                        "blacklist_keyword": keyword,
-                                        "blacklist_size": mm_cfg_for_loop.market_blacklist_keywords.len()
-                                    }),
-                                );
-                                metrics.on_skip();
-                                continue;
-                            }
+                            log_event(
+                                "mm_rewards_skip_blacklisted_market",
+                                json!({
+                                    "strategy_id": STRATEGY_ID_MM_REWARDS_V1,
+                                    "source": market_source,
+                                    "mode": mode.as_str(),
+                                    "condition_id": market.condition_id,
+                                    "slug": market.slug,
+                                    "symbol": target.symbol,
+                                    "timeframe": target.timeframe.as_str(),
+                                    "blacklist_keyword": keyword,
+                                    "blacklist_size": mm_cfg_for_loop.market_blacklist_keywords.len()
+                                }),
+                            );
+                            metrics.on_skip();
+                            continue;
                         }
 
                         if is_single_target_item
@@ -15422,45 +15308,19 @@ async fn main() -> Result<()> {
                                     && end_ts.saturating_sub(now_ms) <= near_expiry_window_ms
                             })
                             .unwrap_or(false);
-                        let reward_below_min_daily_raw = reward_hint_for_gate.is_finite()
+                        let reward_below_min_daily = reward_hint_for_gate.is_finite()
                             && reward_hint_for_gate < mm_cfg_for_loop.min_total_reward_quote;
-                        let market_within_exit_window_gate =
-                            market_within_exit_window && !cbb_priority_bypass_filters;
-                        let reward_below_min_daily =
-                            reward_below_min_daily_raw && !cbb_priority_bypass_filters;
-                        if cbb_priority_bypass_filters
-                            && (market_within_exit_window || reward_below_min_daily_raw)
-                        {
-                            log_event(
-                                "mm_rewards_cbb_priority_filter_bypass",
-                                json!({
-                                    "strategy_id": STRATEGY_ID_MM_REWARDS_V1,
-                                    "source": market_source,
-                                    "mode": mode.as_str(),
-                                    "condition_id": market.condition_id,
-                                    "slug": market.slug,
-                                    "symbol": target.symbol,
-                                    "timeframe": target.timeframe.as_str(),
-                                    "filter": "exit_mode_gate",
-                                    "market_within_exit_window": market_within_exit_window,
-                                    "reward_below_min_daily_raw": reward_below_min_daily_raw,
-                                    "min_total_reward_quote": mm_cfg_for_loop.min_total_reward_quote,
-                                    "cbb_priority_scope": is_cbb_priority_market
-                                }),
-                            );
-                        }
-                        if market_within_exit_window_gate || reward_below_min_daily {
-                            if market_within_exit_window_gate {
+                        if market_within_exit_window || reward_below_min_daily {
+                            if market_within_exit_window {
                                 forced_inventory_exit_market = true;
                             }
-                            if market_within_exit_window_gate
-                                && mm_buy_quoting_disabled_reason.is_none()
+                            if market_within_exit_window && mm_buy_quoting_disabled_reason.is_none()
                             {
                                 mm_buy_quoting_disabled_reason = Some("near_expiry_exit_window");
                             }
                             if market_source == "auto"
                                 && !forced_inventory_scope
-                                && market_within_exit_window_gate
+                                && market_within_exit_window
                             {
                                 let reject_until_ms =
                                     now_ms.saturating_add(replacement_cooldown_ms);
@@ -15480,7 +15340,7 @@ async fn main() -> Result<()> {
                                             "strategy_id": STRATEGY_ID_MM_REWARDS_V1,
                                             "condition_id": market.condition_id,
                                             "mode": mode.as_str(),
-                                            "reason": if market_within_exit_window_gate {
+                                            "reason": if market_within_exit_window {
                                                 "near_expiry_exit_window"
                                             } else {
                                                 "reward_daily_below_min"
@@ -15514,14 +15374,11 @@ async fn main() -> Result<()> {
                                         "market_end_ts_ms": market_end_ts_ms,
                                         "near_expiry_exit_window_sec": mm_cfg_for_loop.near_expiry_exit_window_sec,
                                         "market_within_exit_window": market_within_exit_window,
-                                        "market_within_exit_window_gate": market_within_exit_window_gate,
                                         "reward_daily_rate": reward_daily_rate_effective,
                                         "reward_gate_value": reward_hint_for_gate,
                                         "min_total_reward_quote": mm_cfg_for_loop.min_total_reward_quote,
                                         "reward_below_min_daily": reward_below_min_daily,
-                                        "reward_below_min_daily_raw": reward_below_min_daily_raw,
-                                        "hard_exit_gate": market_within_exit_window_gate,
-                                        "cbb_priority_filter_bypass": cbb_priority_bypass_filters
+                                        "hard_exit_gate": market_within_exit_window
                                     }),
                                 );
                             }
@@ -15581,29 +15438,7 @@ async fn main() -> Result<()> {
                         } else {
                             0.0
                         };
-                        if cbb_priority_bypass_filters
-                            && mm_cfg_for_loop.max_reward_min_size > 0.0
-                            && reward_min_size_effective > mm_cfg_for_loop.max_reward_min_size
-                        {
-                            log_event(
-                                "mm_rewards_cbb_priority_filter_bypass",
-                                json!({
-                                    "strategy_id": STRATEGY_ID_MM_REWARDS_V1,
-                                    "source": market_source,
-                                    "mode": mode.as_str(),
-                                    "condition_id": market.condition_id,
-                                    "slug": market.slug,
-                                    "symbol": target.symbol,
-                                    "timeframe": target.timeframe.as_str(),
-                                    "filter": "max_reward_min_size",
-                                    "reward_min_size_effective": reward_min_size_effective,
-                                    "max_reward_min_size": mm_cfg_for_loop.max_reward_min_size,
-                                    "cbb_priority_scope": is_cbb_priority_market
-                                }),
-                            );
-                        }
-                        if !cbb_priority_bypass_filters
-                            && mm_cfg_for_loop.max_reward_min_size > 0.0
+                        if mm_cfg_for_loop.max_reward_min_size > 0.0
                             && reward_min_size_effective > mm_cfg_for_loop.max_reward_min_size
                         {
                             log_event(
@@ -15630,27 +15465,7 @@ async fn main() -> Result<()> {
                             .competition_level_allowlist
                             .iter()
                             .any(|allowed| allowed == competition_level_norm.as_str());
-                        if !competition_allowed && cbb_priority_bypass_filters {
-                            log_event(
-                                "mm_rewards_cbb_priority_filter_bypass",
-                                json!({
-                                    "strategy_id": STRATEGY_ID_MM_REWARDS_V1,
-                                    "source": market_source,
-                                    "mode": mode.as_str(),
-                                    "condition_id": market.condition_id,
-                                    "slug": market.slug,
-                                    "symbol": target.symbol,
-                                    "timeframe": target.timeframe.as_str(),
-                                    "filter": "competition_level_allowlist",
-                                    "competition_level": competition_level_norm,
-                                    "competition_raw": competition_raw,
-                                    "competition_source": competition_source,
-                                    "allowlist": mm_cfg_for_loop.competition_level_allowlist,
-                                    "cbb_priority_scope": is_cbb_priority_market
-                                }),
-                            );
-                        }
-                        if !competition_allowed && !cbb_priority_bypass_filters {
+                        if !competition_allowed {
                             log_event(
                                 "mm_rewards_skip_competition_level_filtered",
                                 json!({
@@ -15672,9 +15487,7 @@ async fn main() -> Result<()> {
                         }
                         let was_competition_frozen = mm_competition_high_freeze_since_ms
                             .contains_key(market.condition_id.as_str());
-                        if mm_cfg_for_loop.competition_high_freeze_enable
-                            && !cbb_priority_bypass_filters
-                        {
+                        if mm_cfg_for_loop.competition_high_freeze_enable {
                             if competition_level.eq_ignore_ascii_case("high")
                                 && !was_competition_frozen
                             {
@@ -15716,7 +15529,6 @@ async fn main() -> Result<()> {
                         }
                         let competition_freeze_active = mm_cfg_for_loop
                             .competition_high_freeze_enable
-                            && !cbb_priority_bypass_filters
                             && mm_competition_high_freeze_since_ms
                                 .contains_key(market.condition_id.as_str());
 
@@ -19656,25 +19468,18 @@ async fn main() -> Result<()> {
                                         .ok()
                                         .unwrap_or(300)
                                         .max(50);
-                                let cbb_priority_min_rest_ms = if is_cbb_priority_market {
-                                    mm_cfg_for_loop
-                                        .cbb_priority_min_rest_ms
-                                        .max(base_reprice_ms)
-                                } else {
-                                    base_reprice_ms
-                                };
                                 let normal_top_rest_ms = mm_cfg_for_loop
                                     .normal_top_reprice_min_rest_ms
-                                    .max(cbb_priority_min_rest_ms);
+                                    .max(base_reprice_ms);
                                 let normal_top_cooldown_ms = mm_cfg_for_loop
                                     .normal_top_reprice_cooldown_ms
                                     .max(normal_top_rest_ms);
                                 let anchor_rest_ms = mm_cfg_for_loop
                                     .requote_anchor_min_rest_ms
-                                    .max(cbb_priority_min_rest_ms);
+                                    .max(base_reprice_ms);
                                 let outer_rest_ms = mm_cfg_for_loop
                                     .requote_outer_min_rest_ms
-                                    .max(cbb_priority_min_rest_ms);
+                                    .max(base_reprice_ms);
                                 let min_reprice_cooldown_ms = if normal_top_hit_rows > 0 {
                                     normal_top_cooldown_ms
                                 } else if anchor_mismatch_rows > 0 {
@@ -19753,8 +19558,6 @@ async fn main() -> Result<()> {
                                             "competition_level": competition_level,
                                             "normal_top_reprice_min_rest_ms": mm_cfg_for_loop.normal_top_reprice_min_rest_ms,
                                             "normal_top_reprice_cooldown_ms": mm_cfg_for_loop.normal_top_reprice_cooldown_ms,
-                                            "cbb_priority_scope": is_cbb_priority_market,
-                                            "cbb_priority_min_rest_ms": if is_cbb_priority_market { Some(mm_cfg_for_loop.cbb_priority_min_rest_ms) } else { None::<i64> },
                                             "conserve_active": conserve_active,
                                             "conserve_active_effective": conserve_active_effective,
                                             "conserve_actions_enable": mm_cfg_for_loop.conserve_actions_enable,
@@ -25744,7 +25547,6 @@ struct RemoteEndgameAlphaResponse {
 struct RemoteMmRewardsSelectionCandidatePayload {
     condition_id: String,
     slug: String,
-    is_cbb: bool,
     reward_daily_rate: f64,
     reward_midpoint: Option<f64>,
     best_bid_up: Option<f64>,
@@ -26940,7 +26742,6 @@ fn mm_rewards_selection_candidate_payload(
     RemoteMmRewardsSelectionCandidatePayload {
         condition_id: candidate.market.condition_id.clone(),
         slug: candidate.market.slug.clone(),
-        is_cbb: candidate.is_cbb,
         reward_daily_rate: candidate.reward_snapshot.reward_daily_rate,
         reward_midpoint: candidate.reward_snapshot.midpoint,
         best_bid_up: candidate.best_bid_up,
@@ -28942,12 +28743,9 @@ mod tests {
 
     #[test]
     fn premarket_batch_continue_on_error_flag_parses() {
-        with_admin_env(
-            &[("EVPOLY_PREMARKET_BATCH_CONTINUE_ON_ERROR", Some("true"))],
-            || {
-                assert!(premarket_batch_continue_on_error());
-            },
-        );
+        unsafe { std::env::set_var("EVPOLY_PREMARKET_BATCH_CONTINUE_ON_ERROR", "true") };
+        assert!(premarket_batch_continue_on_error());
+        unsafe { std::env::remove_var("EVPOLY_PREMARKET_BATCH_CONTINUE_ON_ERROR") };
     }
 
     #[test]
@@ -28978,12 +28776,12 @@ mod tests {
 
     #[test]
     fn premarket_side_budget_uses_base_and_timeframe_policy() {
-        with_admin_env(&[("EVPOLY_PREMARKET_BASE_SIZE_USD", Some("200"))], || {
-            assert!((premarket_side_budget_usd(Timeframe::M5) - 150.0).abs() < 1e-9);
-            assert!((premarket_side_budget_usd(Timeframe::M15) - 200.0).abs() < 1e-9);
-            assert!((premarket_side_budget_usd(Timeframe::H1) - 250.0).abs() < 1e-9);
-            assert!((premarket_side_budget_usd(Timeframe::H4) - 250.0).abs() < 1e-9);
-        });
+        unsafe { std::env::set_var("EVPOLY_PREMARKET_BASE_SIZE_USD", "200") };
+        assert!((premarket_side_budget_usd(Timeframe::M5) - 150.0).abs() < 1e-9);
+        assert!((premarket_side_budget_usd(Timeframe::M15) - 200.0).abs() < 1e-9);
+        assert!((premarket_side_budget_usd(Timeframe::H1) - 250.0).abs() < 1e-9);
+        assert!((premarket_side_budget_usd(Timeframe::H4) - 250.0).abs() < 1e-9);
+        unsafe { std::env::remove_var("EVPOLY_PREMARKET_BASE_SIZE_USD") };
     }
 
     #[test]
@@ -29000,13 +28798,11 @@ mod tests {
 
     #[test]
     fn premarket_side_budget_scales_by_asset_multiplier() {
-        with_admin_env(&[("EVPOLY_PREMARKET_BASE_SIZE_USD", None)], || {
-            let base = premarket_side_budget_usd(Timeframe::M5);
-            let eth_multiplier = premarket_side_budget_multiplier("ETH");
-            let eth_budget = premarket_side_budget_usd_for_asset(Timeframe::M5, "ETH");
-            assert!((eth_multiplier - 0.8).abs() < 1e-9);
-            assert!((eth_budget - (base * eth_multiplier)).abs() < 1e-9);
-        });
+        let base = premarket_side_budget_usd(Timeframe::M5);
+        let eth_multiplier = premarket_side_budget_multiplier("ETH");
+        let eth_budget = premarket_side_budget_usd_for_asset(Timeframe::M5, "ETH");
+        assert!((eth_multiplier - 0.8).abs() < 1e-9);
+        assert!((eth_budget - (base * eth_multiplier)).abs() < 1e-9);
     }
 
     #[test]

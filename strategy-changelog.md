@@ -67,24 +67,19 @@ Older entries may reference env keys that were removed in later commits.
 
 ## Change Log
 
+### 2026-03-18
+
+- `mm_rewards_v1` CBB priority/only paths were removed from runtime (`src/main.rs`, `src/mm/mod.rs`, `src/mm/reward_scanner.rs`, `src/bin/alpha_service.rs`, `.env.example`, `.env.full.example`, `docs/mm_rewards_v1.md`):
+  - removed `EVPOLY_MM_CBB_*` env surface and CBB-only/piority selection hooks.
+  - removed CBB candidate metadata plumbing (`is_cbb`) from MM rewards discovery/selection payloads.
+  - MM rewards now runs without CBB-specific bypass/selection behavior.
+
 ### 2026-03-17
 
 - `mm_rewards_v1` now enforces reward minimum share size on SELL/exit order paths when reward-min enforcement is enabled and the market side is reward-eligible (`src/main.rs`):
   - weak-exit sell replacement and inventory-reduction sell paths now compute `min_exit_shares` as `max(exchange_min_shares, reward_min_shares_with_policy)` instead of exchange floor only.
-  - this keeps CBB/MM-reward exit quotes at reward-qualifying share size (including inventory unwind/rebalance ladders), avoiding sub-min-size SELL quotes that forfeit rewards.
+  - this keeps MM-reward exit quotes at reward-qualifying share size (including inventory unwind/rebalance ladders), avoiding sub-min-size SELL quotes that forfeit rewards.
   - affected knobs/code paths: `reward_min_size_enforce`, `mm_reward_min_shares_with_policy`, and SELL `min_exit_shares` calculation in MM rewards loop.
-
-- `mm_rewards_v1` added CBB priority market path for MM auto-selection and execution policy (`src/main.rs`, `src/mm/mod.rs`, `src/mm/reward_scanner.rs`, `src/bin/alpha_service.rs`, `.env.example`, `.env.full.example`, `docs/mm_rewards_v1.md`):
-  - auto candidate payloads and in-memory candidates now carry `is_cbb` metadata, and MM auto refresh injects top CBB candidates into active selection when enabled.
-  - new MM env knobs:
-    - `EVPOLY_MM_CBB_PRIORITY_ENABLE`
-    - `EVPOLY_MM_CBB_PRIORITY_MAX_MARKETS`
-    - `EVPOLY_MM_CBB_PRIORITY_MIN_REWARD_RATE_HINT`
-    - `EVPOLY_MM_CBB_PRIORITY_BYPASS_FILTERS`
-    - `EVPOLY_MM_CBB_PRIORITY_MIN_REST_MS`
-  - when CBB priority is enabled and candidate is in CBB priority scope, MM bypasses soft filter gates (market blacklist, exit-mode reward/near-expiry soft gate, max reward min-size cap, competition allowlist/high-freeze), while keeping core reward eligibility/scoring/risk pipeline intact.
-  - CBB priority path now enforces a per-market minimum cancel/reprice rest floor via `EVPOLY_MM_CBB_PRIORITY_MIN_REST_MS` (intended for 3.5s book-rest constraints).
-
 ### 2026-03-16
 
 - `mm_rewards_v1` weak-exit stale balance fallback is now hard-disabled in runtime (`src/mm/mod.rs`):

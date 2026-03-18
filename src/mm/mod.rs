@@ -379,11 +379,6 @@ pub struct MmRewardsConfig {
     pub skew_deepen_levels_max: usize,
     pub competition_high_freeze_enable: bool,
     pub competition_level_allowlist: Vec<String>,
-    pub cbb_priority_enable: bool,
-    pub cbb_priority_max_markets: usize,
-    pub cbb_priority_min_reward_rate_hint: f64,
-    pub cbb_priority_bypass_filters: bool,
-    pub cbb_priority_min_rest_ms: i64,
     pub market_blacklist_keywords: Vec<String>,
     pub spike_reward_rate_min: f64,
     pub mode_enable_quiet_stack: bool,
@@ -766,17 +761,6 @@ impl MmRewardsConfig {
             competition_level_allowlist: parse_competition_level_allowlist_env(
                 "EVPOLY_MM_COMPETITION_LEVEL_ALLOWLIST",
             ),
-            cbb_priority_enable: env_bool("EVPOLY_MM_CBB_PRIORITY_ENABLE", false),
-            cbb_priority_max_markets: env_usize("EVPOLY_MM_CBB_PRIORITY_MAX_MARKETS", 13)
-                .clamp(1, 256),
-            cbb_priority_min_reward_rate_hint: env_f64(
-                "EVPOLY_MM_CBB_PRIORITY_MIN_REWARD_RATE_HINT",
-                0.0,
-            )
-            .max(0.0),
-            cbb_priority_bypass_filters: env_bool("EVPOLY_MM_CBB_PRIORITY_BYPASS_FILTERS", true),
-            cbb_priority_min_rest_ms: env_u64("EVPOLY_MM_CBB_PRIORITY_MIN_REST_MS", 3_500)
-                .clamp(250, 120_000) as i64,
             market_blacklist_keywords: parse_string_list_env("EVPOLY_MM_MARKET_BLACKLIST_KEYWORDS"),
             spike_reward_rate_min: env_f64("EVPOLY_MM_SPIKE_REWARD_RATE_MIN", 50.0).max(0.0),
             mode_enable_quiet_stack: true,
