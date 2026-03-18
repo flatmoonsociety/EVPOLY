@@ -4,7 +4,7 @@
 `evsnipe_v1` trades hit-price and close/range crypto markets using Binance live data and fast PM execution.
 
 ## Default Scope
-- Symbols: `BTC, ETH, SOL, XRP`
+- Symbols: `BTC, ETH, SOL, XRP, DOGE, BNB, HYPE`
 - Strategy toggle default: `EVPOLY_STRATEGY_EVSNIPE_ENABLE=true`
 
 ## Discovery Model
@@ -40,6 +40,7 @@ Local and remote discovery are aligned to the same EVSnipe filtering model (Poly
 ## Key Env Knobs
 - `EVPOLY_STRATEGY_EVSNIPE_ENABLE`
 - `EVPOLY_EVSNIPE_SYMBOLS`
+- `EVPOLY_ENTRY_WORKER_COUNT_EVSNIPE` (code default `4`)
 - `EVPOLY_EVSNIPE_DISCOVERY_REFRESH_SEC`
 - `EVPOLY_EVSNIPE_MAX_DAYS_TO_EXPIRY`
 - `EVPOLY_EVSNIPE_STRIKE_WINDOW_PCT`

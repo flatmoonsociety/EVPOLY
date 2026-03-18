@@ -4,9 +4,15 @@
 `endgame_sweep_v1` enters late in the period, with checkpoint timing controlled by remote alpha policy and a strict execution guard stack.
 
 ## Default Scope
-- Symbols: `BTC, ETH, SOL, XRP`
+- Symbols: `BTC, ETH, SOL, XRP, DOGE, BNB, HYPE`
 - Timeframes: `5m, 15m, 1h, 4h`
 - Strategy toggle default: `EVPOLY_STRATEGY_ENDGAME_ENABLE=true`
+
+## Proxy Routing Defaults
+- `BTC/ETH/SOL/XRP` use Coinbase proxy feed path.
+- `DOGE/BNB` use Binance trade proxy feed path.
+- `HYPE` uses Hyperliquid for `5m/15m/4h`, and Binance for `1h`.
+- Alpha `submit_proxy_max_age_ms` is multiplied by `3x` for `DOGE/BNB/HYPE`.
 
 ## Alpha-Driven Timing
 At runtime the bot requests one alpha policy per symbol/timeframe/period near `T-60s`.
@@ -24,7 +30,7 @@ Config:
 If required policy is unavailable, the period is skipped (fail-closed).
 
 ## End-to-End Flow
-1. Build symbol proxy feeds (Coinbase/Binance by timeframe path).
+1. Build symbol proxy feeds (Coinbase/Binance/Hyperliquid by symbol+timeframe path).
 2. Compute/restore period base anchor.
 3. Request alpha policy around `T-60s`.
 4. If no valid policy and required mode is enabled, skip period.
@@ -41,7 +47,7 @@ If required policy is unavailable, the period is skipped (fail-closed).
 Base key: `EVPOLY_ENDGAME_BASE_SIZE_USD` (blank defaults to `100`).
 
 Multipliers:
-- Symbol: `BTC=1.0`, `ETH=0.8`, `SOL/XRP=0.5`
+- Symbol: `BTC=1.0`, `ETH=0.8`, `SOL/XRP/DOGE/BNB/HYPE=0.5`
 - Tick split: `tick0=20%`, `tick1=40%`, `tick2=40%`
 
 ## Core Guards
@@ -57,6 +63,7 @@ Multipliers:
 - `EVPOLY_ENDGAME_PER_PERIOD_CAP_USD`
 - `EVPOLY_ENDGAME_SYMBOLS`
 - `EVPOLY_ENDGAME_TIMEFRAMES`
+- `EVPOLY_ENTRY_WORKER_COUNT_ENDGAME` (code default `8`)
 - `EVPOLY_ENDGAME_ALPHA_REQUIRED`
 - `EVPOLY_REMOTE_ENDGAME_ALPHA_URL`
 - `EVPOLY_REMOTE_ENDGAME_ALPHA_TOKEN`

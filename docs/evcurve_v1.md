@@ -4,7 +4,7 @@
 `evcurve_v1` trades checkpoint-based entries using remote alpha decisions with max-buy curve controls and chase-limit execution.
 
 ## Default Scope
-- Symbols: `BTC, ETH, SOL, XRP`
+- Symbols: `BTC, ETH, SOL, XRP, DOGE, BNB, HYPE`
 - Timeframes: `15m, 1h, 4h, 1d`
 - `5m` is removed from EVcurve runtime path
 - Strategy toggle default: `EVPOLY_STRATEGY_EVCURVE_ENABLE=true`
@@ -39,7 +39,7 @@ Behavior:
 Base key: `EVPOLY_EVCURVE_BASE_SIZE_USD` (blank defaults to `100`).
 
 Multipliers:
-- Symbol: `BTC=1.0`, `ETH=0.8`, `SOL/XRP=0.5`
+- Symbol: `BTC=1.0`, `ETH=0.8`, `SOL/XRP/DOGE/BNB/HYPE=0.5`
 - Timeframe: `15m=0.75`, `1h=1.0`, `4h/1d=1.25`
 
 ## Order-Type Note

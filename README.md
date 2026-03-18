@@ -21,11 +21,13 @@ See [LICENSE](LICENSE).
 - `sessionband_v1`
 - `evsnipe_v1`
 - `mm_rewards_v1`
+- `mm_sport_v1`
 
 ## Current Default Runtime Profile
 - Strategy toggles default ON: `premarket`, `endgame`, `evcurve`, `sessionband`, `evsnipe`
-- Strategy toggle default OFF: `mm_rewards`
-- Default symbols: `BTC,ETH,SOL,XRP`
+- Strategy toggles default OFF: `mm_rewards`, `mm_sport`
+- Default symbols (`premarket`, `sessionband`): `BTC,ETH,SOL,XRP`
+- Default symbols (`endgame`, `evcurve`, `evsnipe`): `BTC,ETH,SOL,XRP,DOGE,BNB,HYPE`
 - MM market mode default: `auto`
 
 Defaults are defined by runtime config loaders and reflected in `.env.example` / `.env.full.example`.
@@ -56,12 +58,22 @@ Defaults are defined by runtime config loaders and reflected in `.env.example` /
 6. Start:
    `./ev start live`
 
+## Runtime Control (Required)
+Use `./ev` for bot lifecycle control. Do not run live bot with direct `cargo run` for the main runtime.
+
+`./ev` handles release build checks, tmux session management, `.env` loading, disk-guard pruning, wallet-sync worker management, and managed auto-restart.
+
 ## Useful Commands
 - `./ev start live`
+- `./ev start dry`
 - `./ev restart live`
 - `./ev status`
 - `./ev logs 200`
 - `./ev stop`
+- `./ev autorestart status`
+- `./ev autorestart on 6h`
+- `./ev autorestart off`
+- `./ev autorestart run-now`
 - `./scripts/doctor.sh`
 - `./scripts/bootstrap_oss.sh`
 

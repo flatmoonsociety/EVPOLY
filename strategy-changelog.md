@@ -77,6 +77,11 @@ Older entries may reference env keys that were removed in later commits.
 
 ### 2026-03-18
 
+- Docs/env surface alignment for 7-symbol rollout (`.env.full.example`, `docs/endgame_sweep_v1.md`, `docs/evcurve_v1.md`, `docs/evsnipe_v1.md`, `README.md`, `AGENTS.md`):
+  - `.env.full.example` now sets `EVPOLY_ENTRY_WORKER_COUNT_ENDGAME=8` to match runtime code default.
+  - strategy guides now reflect 7-symbol defaults for endgame/evcurve/evsnipe (`BTC,ETH,SOL,XRP,DOGE,BNB,HYPE`) and updated symbol sizing notes.
+  - operator/AI runtime docs now explicitly require `./ev` for live start/restart/status/log lifecycle.
+
 - `mm_sport_v1` discovery refresh cadence is now hardcoded to `300s` with no env override (`src/mm/mod.rs`, `.env.example`, `.env.full.example`):
   - removed runtime env path `EVPOLY_MM_SPORT_DISCOVERY_REFRESH_SEC`.
   - MM Sport discovery now always refreshes every 5 minutes regardless of env.

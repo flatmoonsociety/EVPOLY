@@ -17,6 +17,7 @@ Strategies include (minimum):
 - `sessionband_v1`
 - `evsnipe_v1`
 - `mm_rewards_v1`
+- `mm_sport_v1`
 
 ## Details: Low-Level AI Operating Guide
 
@@ -43,14 +44,19 @@ Strategies include (minimum):
 ### 3) Current Runtime Defaults
 - Strategy toggles:
   - ON: premarket, endgame, evcurve, sessionband, evsnipe
-  - OFF: mm_rewards
-- Global symbols default enabled: `BTC, ETH, SOL, XRP`
+  - OFF: mm_rewards, mm_sport
+- Default symbols:
+  - premarket/sessionband: `BTC, ETH, SOL, XRP`
+  - endgame/evcurve/evsnipe: `BTC, ETH, SOL, XRP, DOGE, BNB, HYPE`
 - MM mode default: `auto`
 
 ### 4) Known Combo Constraints
-- `mm_rewards_v1` should run alone.
+- `mm_rewards_v1` should run alone, except optional pairing with `mm_sport_v1`.
 - `endgame_sweep_v1` and `sessionband_v1` should not run together.
 - See `docs/strategy_combos.md`.
+
+### Runtime Control Rule
+- Use `./ev` for runtime lifecycle (`start/restart/stop/status/logs/autorestart`) and do not run the live main bot using direct `cargo run`.
 
 ### 5) Remote Dependency Facts
 - Shared timeframe discovery: remote-first with local fallback.
