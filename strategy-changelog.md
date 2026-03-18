@@ -122,7 +122,7 @@ Older entries may reference env keys that were removed in later commits.
 
 - `endgame_sweep_v1` arbiter worker defaults and fastlane submit dispatch were adjusted for 7-symbol concurrency (`src/main.rs`):
   - default `EVPOLY_ENTRY_WORKER_COUNT_ENDGAME` fallback changed from `2` to `8` when env is unset.
-  - endgame fastlane submit path no longer blocks worker loop on `submit_task.await`; endgame requests now use spawned submit tasks like non-fastlane paths, while `sessionband_v1` keeps existing blocking fastlane behavior.
+  - endgame fastlane submit path no longer blocks worker loop on `submit_task.await`; endgame requests now use spawned submit tasks like non-fastlane paths.
   - affects endgame execution queueing/submit concurrency across enabled endgame symbols/timeframes by reducing per-worker head-of-line blocking under bursty tick windows.
 
 - `endgame_sweep_v1` proxy-source routing was hardcoded for the 7-symbol default universe (`src/main.rs`, `src/hyperliquid_wss.rs`, `src/lib.rs`):
@@ -151,6 +151,15 @@ Older entries may reference env keys that were removed in later commits.
   - runtime now multiplies remote alpha `submit_proxy_max_age_ms` by `3x` for `DOGE`, `BNB`, and `HYPE` before enqueueing endgame requests.
   - the effective value is now used in arbiter request proxy-age override and endgame execution telemetry payloads (`alpha_submit_proxy_max_age_ms`).
   - affects endgame proxy-stale gating across enabled endgame timeframes for `DOGE/BNB/HYPE` only; other symbols keep the unscaled remote alpha value.
+
+- `sessionband_v1` fastlane submit dispatch now uses nonblocking worker submit scheduling (`src/main.rs`):
+  - arbiter fastlane worker path now spawns `sessionband_v1` submit tasks instead of awaiting each submit inline.
+  - aligns sessionband with endgame fastlane behavior to reduce worker head-of-line blocking during bursty periods.
+  - affects sessionband execution queueing/submit concurrency across enabled sessionband symbols/timeframes.
+
+- `evsnipe_v1` arbiter worker default pool size fallback increased (`src/main.rs`):
+  - default `EVPOLY_ENTRY_WORKER_COUNT_EVSNIPE` fallback changed from `2` to `4` when env is unset.
+  - affects EVSnipe arbiter execution parallelism defaults for EVSnipe entry submits (all EVSnipe symbols/timeframes).
 
 ### 2026-03-17
 

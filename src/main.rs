@@ -3264,7 +3264,7 @@ async fn main() -> Result<()> {
     let worker_count_evsnipe = std::env::var("EVPOLY_ENTRY_WORKER_COUNT_EVSNIPE")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(2)
+        .unwrap_or(4)
         .max(1);
     let spawn_arbiter_workers = |pool_label: &'static str,
                                  mut arbiter_exec_rx: tokio::sync::mpsc::Receiver<
@@ -3385,8 +3385,10 @@ async fn main() -> Result<()> {
                         request.intent.strategy_id.as_str(),
                         STRATEGY_ID_ENDGAME_SWEEP_V1 | STRATEGY_ID_SESSIONBAND_V1
                     );
-                    let endgame_nonblocking_submit =
-                        request.intent.strategy_id == STRATEGY_ID_ENDGAME_SWEEP_V1;
+                    let fastlane_nonblocking_submit = matches!(
+                        request.intent.strategy_id.as_str(),
+                        STRATEGY_ID_ENDGAME_SWEEP_V1 | STRATEGY_ID_SESSIONBAND_V1
+                    );
                     let begin = {
                         let gate_wait_started = Instant::now();
                         let mut gate = worker_idempotency_for_exec.lock().await;
@@ -4148,7 +4150,7 @@ async fn main() -> Result<()> {
                             None,
                         );
                     };
-                    if fastlane_strategy && !endgame_nonblocking_submit {
+                    if fastlane_strategy && !fastlane_nonblocking_submit {
                         submit_task.await;
                     } else {
                         tokio::spawn(submit_task);
