@@ -1720,6 +1720,7 @@ impl PolymarketApi {
     fn align_fak_buy_usdc_notional_for_precision_caps(
         requested_usdc_notional: rust_decimal::Decimal,
         price: rust_decimal::Decimal,
+        taker_probe_scale_hint: Option<u32>,
     ) -> rust_decimal::Decimal {
         const USDC_SCALE: u32 = 2;
         const TAKER_MAX_SCALE: u32 = 4;
@@ -1734,8 +1735,9 @@ impl PolymarketApi {
         let one_cent = rust_decimal::Decimal::new(1, USDC_SCALE);
         let mut candidate = requested_usdc_notional
             .round_dp_with_strategy(USDC_SCALE, RoundingStrategy::MidpointAwayFromZero);
-        let price_scale = price.scale();
-        let taker_probe_scale = price_scale.saturating_add(2).clamp(TAKER_MAX_SCALE, 8);
+        let taker_probe_scale = taker_probe_scale_hint
+            .unwrap_or_else(|| price.scale().saturating_add(2))
+            .clamp(TAKER_MAX_SCALE, 8);
 
         for _ in 0..=MAX_ADJUST_STEPS {
             let taker_amount = (candidate / price)
@@ -4179,9 +4181,27 @@ impl PolymarketApi {
                 Side::Buy => {
                     let requested_usdc_notional = (size * price)
                         .round_dp_with_strategy(2, RoundingStrategy::MidpointAwayFromZero);
+                    let tick_size_scale: Option<u32> = match handle.client.tick_size(token_id).await
+                    {
+                        Ok(tick_size) => Some(tick_size.minimum_tick_size.as_decimal().scale()),
+                        Err(e) => {
+                            warn!(
+                                "Failed to fetch token tick_size for FAK/FOK BUY precision alignment token={} side={} err={}; falling back to price-scale probe",
+                                order.token_id,
+                                order.side,
+                                e
+                            );
+                            None
+                        }
+                    };
+                    let taker_probe_scale = tick_size_scale
+                        .map(|scale| scale.saturating_add(2))
+                        .unwrap_or_else(|| price.scale().saturating_add(2))
+                        .clamp(4, 8);
                     let usdc_notional = Self::align_fak_buy_usdc_notional_for_precision_caps(
                         requested_usdc_notional,
                         price,
+                        Some(taker_probe_scale),
                     );
                     if usdc_notional <= rust_decimal::Decimal::ZERO {
                         anyhow::bail!(
@@ -4192,11 +4212,13 @@ impl PolymarketApi {
                     }
                     if usdc_notional < requested_usdc_notional {
                         warn!(
-                            "Adjusted FAK/FOK BUY notional for precision caps: requested={} adjusted={} price={} price_scale={}",
+                            "Adjusted FAK/FOK BUY notional for precision caps: requested={} adjusted={} price={} price_scale={} tick_size_scale={:?} taker_probe_scale={}",
                             requested_usdc_notional,
                             usdc_notional,
                             price,
-                            price.scale()
+                            price.scale(),
+                            tick_size_scale,
+                            taker_probe_scale
                         );
                     }
                     Amount::usdc(usdc_notional).context(format!(

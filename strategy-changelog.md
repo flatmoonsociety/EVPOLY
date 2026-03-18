@@ -161,6 +161,11 @@ Older entries may reference env keys that were removed in later commits.
   - default `EVPOLY_ENTRY_WORKER_COUNT_EVSNIPE` fallback changed from `2` to `4` when env is unset.
   - affects EVSnipe arbiter execution parallelism defaults for EVSnipe entry submits (all EVSnipe symbols/timeframes).
 
+- Shared FAK/FOK BUY precision alignment now probes taker scale from token tick-size instead of price scale fallback only (`src/api.rs`):
+  - submit path now fetches token `minimum_tick_size` and uses `minimum_tick_size` decimal scale + `2` as the taker probe scale for cent-step USDC notional alignment, with fallback to the previous `price.scale() + 2` behavior if tick-size fetch fails.
+  - affects immediate BUY submit precision gating across strategies that use shared `place_order` FAK/FOK BUY path (`endgame_sweep_v1`, `sessionband_v1`, `evsnipe_v1`, and other FAK/FOK BUY callers) for all enabled symbols/timeframes.
+  - objective is to reduce exchange precision rejects (`maker <= 2`, `taker <= 4`) on markets with finer token tick sizes (for example `0.001`).
+
 ### 2026-03-17
 
 - Shared size policy symbol multiplier defaults expanded to include `DOGE/BNB/HYPE` at `0.5` (`src/size_policy.rs`, `.env.full.example`):
