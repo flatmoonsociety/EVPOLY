@@ -384,7 +384,6 @@ pub struct MmRewardsConfig {
     pub cbb_priority_max_markets: usize,
     pub cbb_priority_min_reward_rate_hint: f64,
     pub cbb_priority_bypass_filters: bool,
-    pub cbb_hard_bypass_enable: bool,
     pub cbb_priority_min_rest_ms: i64,
     pub market_blacklist_keywords: Vec<String>,
     pub spike_reward_rate_min: f64,
@@ -778,7 +777,6 @@ impl MmRewardsConfig {
             )
             .max(0.0),
             cbb_priority_bypass_filters: env_bool("EVPOLY_MM_CBB_PRIORITY_BYPASS_FILTERS", true),
-            cbb_hard_bypass_enable: env_bool("EVPOLY_MM_CBB_HARD_BYPASS_ENABLE", true),
             cbb_priority_min_rest_ms: env_u64("EVPOLY_MM_CBB_PRIORITY_MIN_REST_MS", 3_500)
                 .clamp(250, 120_000) as i64,
             market_blacklist_keywords: parse_string_list_env("EVPOLY_MM_MARKET_BLACKLIST_KEYWORDS"),
