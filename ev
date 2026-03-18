@@ -16,6 +16,7 @@ DISK_AUTO_PRUNE_DEPLOY_TARGET="${EV_DISK_AUTO_PRUNE_DEPLOY_TARGET:-1}"
 RETENTION_SCRIPT="${EV_RETENTION_SCRIPT:-$ROOT_DIR/scripts/evpoly_retention_cleanup.sh}"
 WALLET_SYNC_AUTOSTART="${EV_WALLET_SYNC_AUTOSTART:-1}"
 WALLET_SYNC_WORKER_SCRIPT="${EV_WALLET_SYNC_WORKER_SCRIPT:-$ROOT_DIR/scripts/wallet_sync_worker.sh}"
+AUTO_RESTART_SCRIPT="${EV_AUTO_RESTART_SCRIPT:-$ROOT_DIR/scripts/ev_auto_restart.sh}"
 FORCE_REBUILD="${EV_FORCE_REBUILD:-0}"
 FAST_START="${EV_FAST_START:-0}"
 
@@ -28,6 +29,10 @@ Usage:
   ./ev status
   ./ev logs [lines]
   ./ev cleanup [--dry-run]
+  ./ev autorestart on [10m|1h|6h|daily]
+  ./ev autorestart off
+  ./ev autorestart status
+  ./ev autorestart run-now
 
 Defaults:
   session: $SESSION_NAME
@@ -44,6 +49,7 @@ Env overrides:
   EV_RETENTION_SCRIPT
   EV_WALLET_SYNC_AUTOSTART (1/0)
   EV_WALLET_SYNC_WORKER_SCRIPT
+  EV_AUTO_RESTART_SCRIPT
 EOF
 }
 
@@ -302,6 +308,112 @@ logs_session() {
   fi
 }
 
+autorestart_block_begin() {
+  echo "# EVPOLY_AUTORESTART_BEGIN $ROOT_DIR"
+}
+
+autorestart_block_end() {
+  echo "# EVPOLY_AUTORESTART_END $ROOT_DIR"
+}
+
+cron_expr_from_schedule() {
+  local spec="${1:-6h}"
+  case "${spec,,}" in
+    daily)
+      echo "5 0 * * *"
+      return 0
+      ;;
+    [0-9]*m)
+      local mins="${spec%m}"
+      if [[ -n "$mins" && "$mins" =~ ^[0-9]+$ && "$mins" -ge 1 && "$mins" -le 59 ]]; then
+        echo "*/${mins} * * * *"
+        return 0
+      fi
+      ;;
+    [0-9]*h)
+      local hours="${spec%h}"
+      if [[ -n "$hours" && "$hours" =~ ^[0-9]+$ && "$hours" -ge 1 && "$hours" -le 23 ]]; then
+        echo "5 */${hours} * * *"
+        return 0
+      fi
+      ;;
+  esac
+  echo "invalid schedule '$spec' (use 10m, 1h, 6h, daily, or Nh/Nm)" >&2
+  return 1
+}
+
+autorestart_strip_block() {
+  awk -v begin="$(autorestart_block_begin)" -v end="$(autorestart_block_end)" '
+    $0 == begin {in_block=1; next}
+    $0 == end {in_block=0; next}
+    !in_block {print}
+  '
+}
+
+autorestart_status() {
+  local current
+  current="$(crontab -l 2>/dev/null || true)"
+  local begin end
+  begin="$(autorestart_block_begin)"
+  end="$(autorestart_block_end)"
+  if printf "%s\n" "$current" | grep -Fqx "$begin"; then
+    echo "auto-restart: enabled"
+    printf "%s\n" "$current" | awk -v begin="$begin" -v end="$end" '
+      $0==begin {in_block=1; next}
+      $0==end {in_block=0; next}
+      in_block && $0 !~ /^#/ && length($0) > 0 {print "schedule: " $0}
+    '
+  else
+    echo "auto-restart: disabled"
+  fi
+}
+
+autorestart_on() {
+  local schedule="${1:-6h}"
+  if [[ ! -x "$AUTO_RESTART_SCRIPT" ]]; then
+    echo "auto-restart script not found/executable: $AUTO_RESTART_SCRIPT" >&2
+    exit 1
+  fi
+  local cron_expr
+  cron_expr="$(cron_expr_from_schedule "$schedule")"
+  local begin end
+  begin="$(autorestart_block_begin)"
+  end="$(autorestart_block_end)"
+  local existing stripped tmp
+  existing="$(crontab -l 2>/dev/null || true)"
+  stripped="$(printf "%s\n" "$existing" | autorestart_strip_block)"
+  tmp="$(mktemp)"
+  {
+    printf "%s\n" "$stripped"
+    printf "%s\n" "$begin"
+    printf "%s %s\n" "$cron_expr" "$AUTO_RESTART_SCRIPT"
+    printf "%s\n" "$end"
+  } > "$tmp"
+  crontab "$tmp"
+  rm -f "$tmp"
+  echo "auto-restart enabled: $cron_expr"
+  autorestart_status
+}
+
+autorestart_off() {
+  local existing stripped tmp
+  existing="$(crontab -l 2>/dev/null || true)"
+  stripped="$(printf "%s\n" "$existing" | autorestart_strip_block)"
+  tmp="$(mktemp)"
+  printf "%s\n" "$stripped" > "$tmp"
+  crontab "$tmp"
+  rm -f "$tmp"
+  echo "auto-restart disabled"
+}
+
+autorestart_run_now() {
+  if [[ ! -x "$AUTO_RESTART_SCRIPT" ]]; then
+    echo "auto-restart script not found/executable: $AUTO_RESTART_SCRIPT" >&2
+    exit 1
+  fi
+  "$AUTO_RESTART_SCRIPT"
+}
+
 main() {
   need_tmux
   local action="${1:-}"
@@ -324,6 +436,28 @@ main() {
       ;;
     cleanup)
       cleanup_retention "${2:-}"
+      ;;
+    autorestart)
+      local sub="${2:-status}"
+      case "$sub" in
+        on)
+          autorestart_on "${3:-6h}"
+          ;;
+        off)
+          autorestart_off
+          ;;
+        status)
+          autorestart_status
+          ;;
+        run-now)
+          autorestart_run_now
+          ;;
+        *)
+          echo "unknown autorestart action: $sub" >&2
+          usage
+          exit 1
+          ;;
+      esac
       ;;
     ""|-h|--help|help)
       usage
