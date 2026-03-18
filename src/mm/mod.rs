@@ -312,8 +312,7 @@ impl MmSportConfig {
             event_fallback_poll_ms: env_u64("EVPOLY_MM_SPORT_EVENT_FALLBACK_POLL_MS", 1_000)
                 .clamp(100, 30_000),
             ws_stale_ms: env_u64("EVPOLY_MM_SPORT_WS_STALE_MS", 2_500).clamp(250, 30_000) as i64,
-            discovery_refresh_sec: env_u64("EVPOLY_MM_SPORT_DISCOVERY_REFRESH_SEC", 3_600)
-                .clamp(60, 86_400),
+            discovery_refresh_sec: 300,
             rewards_page_budget: env_u32("EVPOLY_MM_SPORT_REWARDS_PAGE_BUDGET", 8).clamp(1, 200),
             min_reward_rate_per_day: env_f64("EVPOLY_MM_SPORT_MIN_REWARD_RATE_PER_DAY", 300.0)
                 .max(0.0),
