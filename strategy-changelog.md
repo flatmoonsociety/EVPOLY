@@ -68,18 +68,27 @@ Older entries may reference env keys that were removed in later commits.
 ### `mm_sport_v1`
 - Sports rewards market-making strategy (default disabled).
 - Discovers pregame sports match markets from rewards API + CLOB market details.
-- Quotes top-of-book on both sides per token (maker-only, post-only), no ladder.
+- Quotes top-of-book BUY on both outcomes (maker-only, post-only), no ladder.
 - Uses reward min-size floor with multiplier and a top-share ratio gate before quote placement.
+- Uses literal SELL only for inventory exit in the prestart window.
 - Pauses a market for 15 minutes after any fill and cancels active market orders during pause.
 
 ## Change Log
 
 ### 2026-03-18
 
+- `mm_sport_v1` now uses websocket-first eventing and side-clamped top-depth gating for quote size control (`src/main.rs`, `src/polymarket_ws.rs`, `src/mm/mod.rs`, `.env.example`, `.env.full.example`):
+  - mm sport discovered token/condition scopes are now injected into polymarket WS subscription targets, enabling websocket-first orderbook and user-order/fill updates for sports markets.
+  - loop wake path is now event-driven (`market` + `user` WS) with timeout fallback to polling (`EVPOLY_MM_SPORT_EVENT_FALLBACK_POLL_MS`).
+  - added WS-assisted fill pause path (`mm_sport_market_paused_on_fill_ws`) that reacts to user-channel matched size deltas and triggers condition pause/cancel immediately.
+  - max share ratio default tightened to `0.02` via `EVPOLY_MM_SPORT_MAX_SHARE_RATIO` (from `0.10`).
+  - added top-level external depth floor `EVPOLY_MM_SPORT_MIN_TOP_DEPTH_USD` (default `100000`): side is skipped if external top depth is below floor.
+  - normal BUY size is now clamped per side to satisfy ratio cap instead of all-or-none rejection; opposite side can continue quoting independently.
+
 - `mm_sport_v1` quoting/execution behavior updated to reduce one-sided SELL failures and align post-fill sizing (`src/main.rs`):
   - normal quoting path now uses BUY-only on both outcomes (no literal SELL in normal mode).
   - post-fill resume sizing now boosts the opposite outcome BUY size by held inventory (`desired_buy = base_quote + opposite_inventory`), e.g. if A fills, B quote grows after pause.
-  - condition-level guard now cancels all active MM Sport orders for the condition when either outcome fails quote validity/rate gate or when BUY placement fails, preventing mixed one-leg states.
+  - normal-mode invalid side handling is now strategy-scoped per token side (stale/non-target rows canceled on that side) while preserving independent quoting on the opposite side.
   - literal SELL remains in the prestart inventory-exit window only (60 minutes before game start), preserving exit behavior while eliminating normal-mode SELL spam.
 
 - `mm_rewards_v1` CBB priority/only paths were removed from runtime (`src/main.rs`, `src/mm/mod.rs`, `src/mm/reward_scanner.rs`, `src/bin/alpha_service.rs`, `.env.example`, `.env.full.example`, `docs/mm_rewards_v1.md`):

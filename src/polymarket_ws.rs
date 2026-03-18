@@ -156,6 +156,7 @@ struct PolymarketWsInner {
     orderbooks: tokio::sync::RwLock<HashMap<String, WsOrderbookSnapshot>>,
     trades: tokio::sync::RwLock<HashMap<String, WsTradeSnapshot>>,
     order_statuses: tokio::sync::RwLock<HashMap<String, WsOrderStatusSnapshot>>,
+    subscription_scope_targets: StdMutex<HashMap<String, WsSubscriptionScopeTargets>>,
     market_update_notify: tokio::sync::Notify,
     user_update_notify: tokio::sync::Notify,
     market_connected_shards: StdMutex<HashMap<usize, bool>>,
@@ -169,12 +170,19 @@ pub struct SharedPolymarketWsState {
     inner: Arc<PolymarketWsInner>,
 }
 
+#[derive(Clone, Debug, Default)]
+struct WsSubscriptionScopeTargets {
+    asset_ids: Vec<U256>,
+    market_ids: Vec<B256>,
+}
+
 pub fn new_shared_polymarket_ws_state() -> SharedPolymarketWsState {
     SharedPolymarketWsState {
         inner: Arc::new(PolymarketWsInner {
             orderbooks: tokio::sync::RwLock::new(HashMap::new()),
             trades: tokio::sync::RwLock::new(HashMap::new()),
             order_statuses: tokio::sync::RwLock::new(HashMap::new()),
+            subscription_scope_targets: StdMutex::new(HashMap::new()),
             market_update_notify: tokio::sync::Notify::new(),
             user_update_notify: tokio::sync::Notify::new(),
             market_connected_shards: StdMutex::new(HashMap::new()),
@@ -186,6 +194,87 @@ pub fn new_shared_polymarket_ws_state() -> SharedPolymarketWsState {
 }
 
 impl SharedPolymarketWsState {
+    pub fn set_subscription_scope_targets(
+        &self,
+        scope_id: &str,
+        token_ids: &[String],
+        condition_ids: &[String],
+    ) {
+        let scope_key = scope_id.trim().to_ascii_lowercase();
+        if scope_key.is_empty() {
+            return;
+        }
+        let mut asset_set: HashSet<U256> = HashSet::new();
+        for token_id in token_ids {
+            if let Some(asset_id) = parse_asset_id(token_id.as_str()) {
+                asset_set.insert(asset_id);
+            }
+        }
+        let mut market_set: HashSet<B256> = HashSet::new();
+        for condition_id in condition_ids {
+            if let Ok(market_id) = B256::from_str(condition_id.trim()) {
+                market_set.insert(market_id);
+            }
+        }
+        let mut asset_ids = asset_set.into_iter().collect::<Vec<_>>();
+        asset_ids.sort();
+        let mut market_ids = market_set.into_iter().collect::<Vec<_>>();
+        market_ids.sort();
+
+        let mut guard = self
+            .inner
+            .subscription_scope_targets
+            .lock()
+            .expect("polymarket ws subscription-scope mutex poisoned");
+        if asset_ids.is_empty() && market_ids.is_empty() {
+            guard.remove(scope_key.as_str());
+        } else {
+            guard.insert(
+                scope_key,
+                WsSubscriptionScopeTargets {
+                    asset_ids,
+                    market_ids,
+                },
+            );
+        }
+    }
+
+    pub fn clear_subscription_scope_targets(&self, scope_id: &str) {
+        let scope_key = scope_id.trim().to_ascii_lowercase();
+        if scope_key.is_empty() {
+            return;
+        }
+        let mut guard = self
+            .inner
+            .subscription_scope_targets
+            .lock()
+            .expect("polymarket ws subscription-scope mutex poisoned");
+        guard.remove(scope_key.as_str());
+    }
+
+    pub fn subscription_scope_targets_snapshot(&self) -> (Vec<U256>, Vec<B256>) {
+        let guard = self
+            .inner
+            .subscription_scope_targets
+            .lock()
+            .expect("polymarket ws subscription-scope mutex poisoned");
+        let mut asset_set: HashSet<U256> = HashSet::new();
+        let mut market_set: HashSet<B256> = HashSet::new();
+        for scope in guard.values() {
+            for asset_id in &scope.asset_ids {
+                asset_set.insert(*asset_id);
+            }
+            for market_id in &scope.market_ids {
+                market_set.insert(*market_id);
+            }
+        }
+        let mut asset_ids = asset_set.into_iter().collect::<Vec<_>>();
+        asset_ids.sort();
+        let mut market_ids = market_set.into_iter().collect::<Vec<_>>();
+        market_ids.sort();
+        (asset_ids, market_ids)
+    }
+
     pub async fn get_orderbook(&self, token_id: &str, max_age_ms: i64) -> Option<OrderBook> {
         let now_ms = chrono::Utc::now().timestamp_millis();
         let map = self.inner.orderbooks.read().await;
@@ -622,7 +711,9 @@ async fn run_market_loop(
     let mut last_discovered_targets: Option<(Vec<U256>, Vec<B256>, usize)> = None;
     loop {
         let (asset_ids_all, market_ids_all, tracked_markets) =
-            match discover_subscription_targets(api.as_ref(), cfg.market_discovery_limit).await {
+            match discover_subscription_targets(api.as_ref(), &state, cfg.market_discovery_limit)
+                .await
+            {
                 Ok(v) => {
                     last_discovered_targets = Some(v.clone());
                     v
@@ -761,7 +852,13 @@ async fn run_market_loop(
                         );
                         break;
                     }
-                    match discover_subscription_targets(api.as_ref(), cfg.market_discovery_limit).await {
+                    match discover_subscription_targets(
+                        api.as_ref(),
+                        &state,
+                        cfg.market_discovery_limit,
+                    )
+                    .await
+                    {
                         Ok((next_asset_ids_all, next_market_ids_all, next_tracked_markets)) => {
                             let next_asset_ids =
                                 shard_vec(next_asset_ids_all.as_slice(), shard_idx, shard_count);
@@ -1100,7 +1197,9 @@ async fn run_user_loop(
     let mut last_market_targets: Option<(Vec<B256>, usize)> = None;
     loop {
         let (_, market_ids, tracked_markets) =
-            match discover_subscription_targets(api.as_ref(), cfg.market_discovery_limit).await {
+            match discover_subscription_targets(api.as_ref(), &state, cfg.market_discovery_limit)
+                .await
+            {
                 Ok(v) => {
                     last_market_targets = Some((v.1.clone(), v.2));
                     v
@@ -1234,7 +1333,13 @@ async fn run_user_loop(
                         );
                         break;
                     }
-                    match discover_subscription_targets(api.as_ref(), cfg.market_discovery_limit).await {
+                    match discover_subscription_targets(
+                        api.as_ref(),
+                        &state,
+                        cfg.market_discovery_limit,
+                    )
+                    .await
+                    {
                         Ok((_, next_market_ids, next_tracked_markets)) => {
                             if next_market_ids != market_ids {
                                 let now_ms = chrono::Utc::now().timestamp_millis();
@@ -1478,6 +1583,7 @@ fn shard_vec<T: Clone>(items: &[T], shard_idx: usize, shard_count: usize) -> Vec
 
 async fn discover_subscription_targets(
     api: &PolymarketApi,
+    ws_state: &SharedPolymarketWsState,
     limit: u32,
 ) -> anyhow::Result<(Vec<U256>, Vec<B256>, usize)> {
     let mut active_discovery_error: Option<anyhow::Error> = None;
@@ -1519,6 +1625,14 @@ async fn discover_subscription_targets(
                 }
             }
         }
+    }
+
+    let (extra_assets, extra_markets) = ws_state.subscription_scope_targets_snapshot();
+    for asset in extra_assets {
+        asset_ids.insert(asset);
+    }
+    for market in extra_markets {
+        market_ids.insert(market);
     }
 
     let mut asset_vec = asset_ids.into_iter().collect::<Vec<_>>();

@@ -276,11 +276,15 @@ pub struct MmSportConfig {
     pub enable: bool,
     pub hard_disable: bool,
     pub poll_ms: u64,
+    pub event_driven_enable: bool,
+    pub event_fallback_poll_ms: u64,
+    pub ws_stale_ms: i64,
     pub discovery_refresh_sec: u64,
     pub rewards_page_budget: u32,
     pub min_reward_rate_per_day: f64,
     pub quote_size_mult: f64,
     pub max_share_ratio: f64,
+    pub min_top_depth_usd: f64,
     pub pause_after_fill_sec: u64,
     pub reprice_min_interval_ms: i64,
     pub size_requote_delta_pct: f64,
@@ -304,13 +308,18 @@ impl MmSportConfig {
             enable: env_bool("EVPOLY_STRATEGY_MM_SPORT_ENABLE", false),
             hard_disable: env_bool("EVPOLY_MM_SPORT_HARD_DISABLE", false),
             poll_ms: env_u64("EVPOLY_MM_SPORT_POLL_MS", 1_000).clamp(200, 30_000),
+            event_driven_enable: env_bool("EVPOLY_MM_SPORT_EVENT_DRIVEN_ENABLE", true),
+            event_fallback_poll_ms: env_u64("EVPOLY_MM_SPORT_EVENT_FALLBACK_POLL_MS", 1_000)
+                .clamp(100, 30_000),
+            ws_stale_ms: env_u64("EVPOLY_MM_SPORT_WS_STALE_MS", 2_500).clamp(250, 30_000) as i64,
             discovery_refresh_sec: env_u64("EVPOLY_MM_SPORT_DISCOVERY_REFRESH_SEC", 3_600)
                 .clamp(60, 86_400),
             rewards_page_budget: env_u32("EVPOLY_MM_SPORT_REWARDS_PAGE_BUDGET", 8).clamp(1, 200),
             min_reward_rate_per_day: env_f64("EVPOLY_MM_SPORT_MIN_REWARD_RATE_PER_DAY", 300.0)
                 .max(0.0),
             quote_size_mult: env_f64("EVPOLY_MM_SPORT_QUOTE_SIZE_MULT", 1.2).clamp(0.1, 20.0),
-            max_share_ratio: env_f64("EVPOLY_MM_SPORT_MAX_SHARE_RATIO", 0.10).clamp(0.01, 0.99),
+            max_share_ratio: env_f64("EVPOLY_MM_SPORT_MAX_SHARE_RATIO", 0.02).clamp(0.01, 0.99),
+            min_top_depth_usd: env_f64("EVPOLY_MM_SPORT_MIN_TOP_DEPTH_USD", 100_000.0).max(0.0),
             pause_after_fill_sec: env_u64("EVPOLY_MM_SPORT_PAUSE_AFTER_FILL_SEC", 900)
                 .clamp(60, 86_400),
             reprice_min_interval_ms: env_u64("EVPOLY_MM_SPORT_REPRICE_MIN_INTERVAL_MS", 600)
