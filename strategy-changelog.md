@@ -130,6 +130,10 @@ Older entries may reference env keys that were removed in later commits.
   - added `DOGE <-> DOGE-USD` Coinbase product mapping in shared market-symbol helper functions used by endgame feed bootstrap.
   - DOGE now uses the same Coinbase level2 proxy path as BTC/ETH/SOL/XRP in endgame.
 
+- `endgame_sweep_v1` DOGE proxy-source default was hard-switched to Binance to mirror BNB (`src/main.rs`):
+  - `endgame_proxy_source_for_symbol_timeframe(...)` now routes `DOGE` to Binance (`dogeusdt@trade`) for all enabled endgame timeframes.
+  - removes Coinbase as the endgame proxy feed source for DOGE while preserving existing synthetic snapshot/planner interfaces.
+
 - Shared timeframe slug helpers were extended for `DOGE/BNB/HYPE` (`src/main.rs` tests + helpers):
   - added normalize/slug-prefix/H1-D1 asset prefix handling so discovery validation accepts these symbols across `5m/15m/1h/4h` naming paths.
   - touched code paths: `normalize_market_symbol`, `market_symbol_slug_prefixes`, `h1_symbol_from_market_slug`, `h1_market_slug_matches_target_open_ts` fallback symbol set, and `h1_event_slug_asset_prefix`.

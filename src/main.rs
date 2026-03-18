@@ -30004,7 +30004,7 @@ fn endgame_proxy_source_for_symbol_timeframe(
     timeframe: Timeframe,
 ) -> EndgameProxySource {
     match normalize_market_symbol(symbol).as_str() {
-        "BNB" => EndgameProxySource::Binance,
+        "BNB" | "DOGE" => EndgameProxySource::Binance,
         "HYPE" => match timeframe {
             Timeframe::M5 | Timeframe::M15 | Timeframe::H4 => EndgameProxySource::Hyperliquid,
             _ => EndgameProxySource::Binance,
