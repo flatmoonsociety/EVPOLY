@@ -89,6 +89,12 @@ Older entries may reference env keys that were removed in later commits.
   - fill behavior: any `ENTRY_FILL` or `EXIT` event for `mm_sport_v1` pauses that market for `EVPOLY_MM_SPORT_PAUSE_AFTER_FILL_SEC` (default 900s), cancels active orders for that condition, and resumes after pause with inventory-adjusted ask sizing.
   - tracking additions: `tracking_db.list_strategy_fill_events_since(...)` now exposes strategy-scoped fill stream (`ENTRY_FILL` + `EXIT`) used by MM Sport pause logic.
 
+- `mm_sport_v1` sports discovery + pregame inventory-exit behavior updated (`src/main.rs`):
+  - discovery now classifies sports markets using CLOB market tags/category (with slug fallback) instead of requiring `sports/...` slug prefixes, which restores CBB and other sports reward market discovery.
+  - execution now enters inventory-exit mode exactly 60 minutes before `game_start_time`: BUY quoting is canceled/stopped, SELL exits are managed post-only on top ask, and pause-on-fill is bypassed during this prestart exit window.
+  - exit submissions enforce MM-rewards-style minimum exit floor (`max(exchange_min_shares, reward_min_shares)`), and undersized inventory is skipped with explicit telemetry.
+  - affects `mm_sport_v1` only (all sports symbols/timeframes discovered by rewards feed); non-MM-sport strategies unchanged.
+
 ### 2026-03-17
 
 - `mm_rewards_v1` now enforces reward minimum share size on SELL/exit order paths when reward-min enforcement is enabled and the market side is reward-eligible (`src/main.rs`):
