@@ -45,6 +45,14 @@ Request headers:
 - `tp_price` is allowed only for `/manual/open`.
 - `tp_price` on `/manual/close` is rejected (`400`).
 
+## Sizing Semantics (Open/Close)
+- Default sizing is **shares**.
+- Preferred field: `size` (interpreted as shares unless `size_unit: "usd"` is set).
+- Legacy fields still supported:
+  - `target_shares` (explicit shares)
+  - `size_usd` (explicit USD notional)
+- Do not send both `size` and `size_usd` in the same request.
+
 ## Manual Order Modes
 Supported `mode` values for open/close runs:
 - `chase_limit`
@@ -68,7 +76,7 @@ curl -sS -X POST http://127.0.0.1:8791/manual/open \
   -d '{
     "condition_id":"<condition_id>",
     "side":"up",
-    "size_usd":25,
+    "size":500,
     "mode":"chase_limit"
   }'
 ```
@@ -81,8 +89,22 @@ curl -sS -X POST http://127.0.0.1:8791/manual/close \
   -d '{
     "condition_id":"<condition_id>",
     "side":"up",
-    "target_shares":20,
+    "size":20,
     "mode":"limit"
+  }'
+```
+
+Open using explicit USD:
+```bash
+curl -sS -X POST http://127.0.0.1:8791/manual/open \
+  -H 'content-type: application/json' \
+  -H 'x-evpoly-manual-token: YOUR_TOKEN' \
+  -d '{
+    "condition_id":"<condition_id>",
+    "side":"up",
+    "size":25,
+    "size_unit":"usd",
+    "mode":"chase_limit"
   }'
 ```
 

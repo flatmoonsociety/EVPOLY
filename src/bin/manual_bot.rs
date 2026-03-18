@@ -213,6 +213,8 @@ struct ManualOrderRequest {
     period_timestamp: Option<u64>,
     timeframe: Option<String>,
     mode: Option<String>,
+    size: Option<f64>,
+    size_unit: Option<String>,
     size_usd: Option<f64>,
     target_shares: Option<f64>,
     price: Option<f64>,
@@ -268,6 +270,28 @@ impl ManualOrderMode {
             ManualOrderMode::ChaseLimit => "chase_limit",
             ManualOrderMode::Limit => "limit",
             ManualOrderMode::Market => "market",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ManualOrderSizeUnit {
+    Shares,
+    Usd,
+}
+
+impl ManualOrderSizeUnit {
+    fn parse(raw: Option<&str>) -> Result<Self> {
+        let normalized = raw
+            .map(|v| v.trim().to_ascii_lowercase())
+            .filter(|v| !v.is_empty());
+        match normalized.as_deref() {
+            None | Some("share") | Some("shares") => Ok(Self::Shares),
+            Some("usd") | Some("dollar") | Some("dollars") => Ok(Self::Usd),
+            Some(other) => anyhow::bail!(
+                "invalid size_unit '{}'; supported values: shares, usd",
+                other
+            ),
         }
     }
 }
@@ -1594,18 +1618,47 @@ async fn start_manual_order(
             .unwrap_or(price_hint),
     };
 
-    let requested_size_usd = request.size_usd.filter(|v| v.is_finite() && *v > 0.0);
-    let mut target_notional_usd = requested_size_usd;
-
-    let mut target_shares = if let Some(target_shares) = request.target_shares {
-        if !target_shares.is_finite() || target_shares <= 0.0 {
-            anyhow::bail!("target_shares must be positive");
-        }
-        target_shares
+    let mut requested_size_usd = request.size_usd.filter(|v| v.is_finite() && *v > 0.0);
+    let requested_size = request.size.filter(|v| v.is_finite() && *v > 0.0);
+    if requested_size_usd.is_some() && requested_size.is_some() {
+        anyhow::bail!("provide either size or size_usd (not both)");
+    }
+    let size_unit = if requested_size.is_some() {
+        ManualOrderSizeUnit::parse(request.size_unit.as_deref())?
     } else {
-        let size_usd = requested_size_usd
-            .ok_or_else(|| anyhow::anyhow!("provide target_shares or size_usd"))?;
+        ManualOrderSizeUnit::Shares
+    };
+
+    let requested_target_shares = match request.target_shares {
+        Some(target_shares) => {
+            if !target_shares.is_finite() || target_shares <= 0.0 {
+                anyhow::bail!("target_shares must be positive");
+            }
+            Some(target_shares)
+        }
+        None => None,
+    };
+
+    let mut target_notional_usd = requested_size_usd;
+    let mut requested_shares_input = requested_target_shares;
+    let mut target_shares = if let Some(target_shares) = requested_target_shares {
+        target_shares
+    } else if let Some(size) = requested_size {
+        match size_unit {
+            ManualOrderSizeUnit::Shares => {
+                requested_shares_input = Some(size);
+                size
+            }
+            ManualOrderSizeUnit::Usd => {
+                requested_size_usd = Some(size);
+                target_notional_usd = Some(size);
+                size / sizing_reference_price.max(0.000_001)
+            }
+        }
+    } else if let Some(size_usd) = requested_size_usd {
         size_usd / sizing_reference_price.max(0.000_001)
+    } else {
+        anyhow::bail!("provide target_shares, size, or size_usd");
     };
 
     let mut budget_warning: Option<String> = None;
@@ -1648,7 +1701,7 @@ async fn start_manual_order(
             target_shares = initial_balance_shares;
             budget_warning = Some(format!(
                 "target_clamped_to_live_position requested_shares={:.6} live_shares={:.6}",
-                request.target_shares.unwrap_or(target_shares),
+                requested_shares_input.unwrap_or(target_shares),
                 initial_balance_shares
             ));
         }
