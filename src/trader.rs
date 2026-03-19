@@ -2245,10 +2245,38 @@ impl Trader {
             || lower.contains("does not exist")
     }
 
+    fn unknown_order_status_terminal_bucket(raw: &str) -> Option<&'static str> {
+        let lower = raw.trim().to_ascii_lowercase();
+        if lower.is_empty() {
+            return None;
+        }
+        if lower.contains("match") || lower.contains("filled") {
+            return Some("FILLED");
+        }
+        if lower.contains("cancel")
+            || lower.contains("unmatch")
+            || lower.contains("expire")
+            || lower.contains("reject")
+        {
+            return Some("CANCELED");
+        }
+        if lower.contains("invalid")
+            || lower.contains("unknown order")
+            || lower.contains("not found")
+            || lower.contains("does not exist")
+        {
+            return Some("STALE");
+        }
+        None
+    }
+
     fn terminal_status_for_order(order_status: OrderStatusType) -> Option<&'static str> {
         match order_status {
             OrderStatusType::Matched => Some("FILLED"),
             OrderStatusType::Canceled | OrderStatusType::Unmatched => Some("CANCELED"),
+            OrderStatusType::Unknown(raw) => {
+                Self::unknown_order_status_terminal_bucket(raw.as_str())
+            }
             _ => None,
         }
     }
@@ -14861,6 +14889,26 @@ mod tests {
         assert!(Trader::is_exchange_order_id(
             "0x23b457271bce9fa09b4f79125c9ec09e968235a462de82e318ef4eb6fe0ffeb0"
         ));
+    }
+
+    #[test]
+    fn terminal_status_maps_unknown_invalid_to_stale() {
+        use polymarket_client_sdk::clob::types::OrderStatusType;
+
+        assert_eq!(
+            Trader::terminal_status_for_order(OrderStatusType::Unknown("INVALID".to_string())),
+            Some("STALE")
+        );
+    }
+
+    #[test]
+    fn terminal_status_keeps_unknown_non_terminal_open() {
+        use polymarket_client_sdk::clob::types::OrderStatusType;
+
+        assert_eq!(
+            Trader::terminal_status_for_order(OrderStatusType::Unknown("LIVE_PENDING".to_string())),
+            None
+        );
     }
 
     #[test]

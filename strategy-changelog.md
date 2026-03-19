@@ -77,6 +77,14 @@ Older entries may reference env keys that were removed in later commits.
 
 ### 2026-03-19
 
+- `mm_rewards_v1` + `mm_sport_v1` pending-order reconciliation now treats exchange unknown terminal states (notably `INVALID`) as terminal instead of `OPEN` (`src/main.rs`, `src/trader.rs`):
+  - shared terminal helpers now classify unknown status strings into `FILLED` / `CANCELED` / `STALE`; `INVALID` maps to `STALE`.
+  - MM stale-check paths now consider `Unmatched` and terminal unknown statuses as terminal for cleanup.
+  - fixes stale `OPEN` rows that could block quote refresh and create apparent one-sided quoting even when exchange order is already invalid.
+- `mm_sport_v1` websocket order-state loop now writes terminal WS statuses back to `pending_orders` immediately (`src/main.rs`):
+  - on WS terminal status (`Matched`/`Canceled`/`Unmatched`/terminal unknown), DB status is updated in-loop (no wait for slower periodic reconcile).
+  - reduces stale-open lag and prevents phantom “kept” rows from suppressing replacement orders on one side.
+
 - Shared sizing-policy defaults are now env-overridable while keeping the same code defaults (`src/main.rs`, `src/size_policy.rs`, `.env.example`, `.env.full.example`):
   - `premarket_v1` fixed ladder can now be overridden via:
     - `EVPOLY_PREMARKET_FIXED_LADDER_PRICES` (default `0.40,0.30,0.24,0.21,0.15,0.12`)

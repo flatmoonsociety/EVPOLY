@@ -13010,45 +13010,65 @@ async fn main() -> Result<()> {
                                     .copied()
                                     .unwrap_or(0.0)
                                     .max(0.0);
-                                if matched <= prev + 1e-9 {
-                                    continue;
+                                let has_new_match = matched > prev + 1e-9;
+                                if has_new_match {
+                                    ws_matched_by_order_id.insert(order_id.to_string(), matched);
                                 }
-                                ws_matched_by_order_id.insert(order_id.to_string(), matched);
-                                let Some(condition_id) = row.condition_id.as_deref() else {
-                                    continue;
-                                };
-                                if condition_id.trim().is_empty() {
-                                    continue;
+                                if has_new_match {
+                                    let Some(condition_id) = row.condition_id.as_deref() else {
+                                        continue;
+                                    };
+                                    if condition_id.trim().is_empty() {
+                                        continue;
+                                    }
+                                    let pause_until = status.updated_ms.saturating_add(
+                                        i64::try_from(
+                                            mm_sport_cfg_for_loop
+                                                .pause_after_fill_sec
+                                                .saturating_mul(1_000),
+                                        )
+                                        .ok()
+                                        .unwrap_or(900_000),
+                                    );
+                                    let entry = pause_until_by_condition
+                                        .entry(condition_id.to_string())
+                                        .or_insert(0);
+                                    if pause_until > *entry {
+                                        *entry = pause_until;
+                                    }
+                                    paused_conditions.insert(condition_id.to_string());
+                                    log_event(
+                                        "mm_sport_market_paused_on_fill_ws",
+                                        json!({
+                                            "strategy_id": STRATEGY_ID_MM_SPORT_V1,
+                                            "condition_id": condition_id,
+                                            "token_id": row.token_id,
+                                            "order_id": order_id,
+                                            "ws_order_updated_ms": status.updated_ms,
+                                            "ws_size_matched": matched,
+                                            "ws_size_matched_prev": prev,
+                                            "pause_until_ms": pause_until
+                                        }),
+                                    );
                                 }
-                                let pause_until = status.updated_ms.saturating_add(
-                                    i64::try_from(
-                                        mm_sport_cfg_for_loop
-                                            .pause_after_fill_sec
-                                            .saturating_mul(1_000),
-                                    )
-                                    .ok()
-                                    .unwrap_or(900_000),
-                                );
-                                let entry = pause_until_by_condition
-                                    .entry(condition_id.to_string())
-                                    .or_insert(0);
-                                if pause_until > *entry {
-                                    *entry = pause_until;
+                                if let Some(terminal_status) =
+                                    mm_pending_terminal_status(&status.status)
+                                {
+                                    let _ = tracking_db_for_mm_sport
+                                        .update_pending_order_status(order_id, terminal_status);
+                                    log_event(
+                                        "mm_sport_ws_order_terminal_reconcile",
+                                        json!({
+                                            "strategy_id": STRATEGY_ID_MM_SPORT_V1,
+                                            "condition_id": row.condition_id,
+                                            "token_id": row.token_id,
+                                            "order_id": order_id,
+                                            "ws_status": format!("{:?}", status.status),
+                                            "terminal_status": terminal_status,
+                                            "matched_shares": matched,
+                                        }),
+                                    );
                                 }
-                                paused_conditions.insert(condition_id.to_string());
-                                log_event(
-                                    "mm_sport_market_paused_on_fill_ws",
-                                    json!({
-                                        "strategy_id": STRATEGY_ID_MM_SPORT_V1,
-                                        "condition_id": condition_id,
-                                        "token_id": row.token_id,
-                                        "order_id": order_id,
-                                        "ws_order_updated_ms": status.updated_ms,
-                                        "ws_size_matched": matched,
-                                        "ws_size_matched_prev": prev,
-                                        "pause_until_ms": pause_until
-                                    }),
-                                );
                             }
                         }
                         ws_matched_by_order_id
@@ -30313,6 +30333,31 @@ fn price_key_tick(price: f64, tick_size: f64) -> i64 {
     ((price / tick).round()) as i64
 }
 
+fn mm_unknown_order_status_terminal_bucket(raw: &str) -> Option<&'static str> {
+    let lower = raw.trim().to_ascii_lowercase();
+    if lower.is_empty() {
+        return None;
+    }
+    if lower.contains("match") || lower.contains("filled") {
+        return Some("FILLED");
+    }
+    if lower.contains("cancel")
+        || lower.contains("unmatch")
+        || lower.contains("expire")
+        || lower.contains("reject")
+    {
+        return Some("CANCELED");
+    }
+    if lower.contains("invalid")
+        || lower.contains("unknown order")
+        || lower.contains("not found")
+        || lower.contains("does not exist")
+    {
+        return Some("STALE");
+    }
+    None
+}
+
 fn mm_order_status_is_terminal(
     status: &polymarket_client_sdk::clob::types::OrderStatusType,
 ) -> bool {
@@ -30320,6 +30365,11 @@ fn mm_order_status_is_terminal(
         status,
         polymarket_client_sdk::clob::types::OrderStatusType::Matched
             | polymarket_client_sdk::clob::types::OrderStatusType::Canceled
+            | polymarket_client_sdk::clob::types::OrderStatusType::Unmatched
+    ) || matches!(
+        status,
+        polymarket_client_sdk::clob::types::OrderStatusType::Unknown(raw)
+            if mm_unknown_order_status_terminal_bucket(raw.as_str()).is_some()
     )
 }
 
@@ -30338,6 +30388,9 @@ fn mm_pending_terminal_status(
         polymarket_client_sdk::clob::types::OrderStatusType::Matched => Some("FILLED"),
         polymarket_client_sdk::clob::types::OrderStatusType::Canceled
         | polymarket_client_sdk::clob::types::OrderStatusType::Unmatched => Some("CANCELED"),
+        polymarket_client_sdk::clob::types::OrderStatusType::Unknown(raw) => {
+            mm_unknown_order_status_terminal_bucket(raw.as_str())
+        }
         _ => None,
     }
 }
@@ -31319,5 +31372,23 @@ mod tests {
             target_open_ts + 3600,
             target_slug.as_str()
         ));
+    }
+
+    #[test]
+    fn mm_status_helpers_treat_invalid_as_terminal_stale() {
+        use polymarket_client_sdk::clob::types::OrderStatusType;
+
+        let status = OrderStatusType::Unknown("INVALID".to_string());
+        assert!(mm_order_status_is_terminal(&status));
+        assert_eq!(mm_pending_terminal_status(&status), Some("STALE"));
+    }
+
+    #[test]
+    fn mm_status_helpers_keep_unknown_non_terminal_open() {
+        use polymarket_client_sdk::clob::types::OrderStatusType;
+
+        let status = OrderStatusType::Unknown("LIVE_PENDING".to_string());
+        assert!(!mm_order_status_is_terminal(&status));
+        assert_eq!(mm_pending_terminal_status(&status), None);
     }
 }
