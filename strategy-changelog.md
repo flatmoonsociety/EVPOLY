@@ -77,6 +77,11 @@ Older entries may reference env keys that were removed in later commits.
 
 ### 2026-03-19
 
+- `mm_sport_v1` normal quoting now enforces a hard pair-level baseline feasibility gate before any side quote (`src/main.rs`):
+  - hardcoded low-depth floor raised from `30,000` to `50,000` USD (`MM_SPORT_LOW_DEPTH_FLOOR_USD`).
+  - new baseline gate requires both outcomes to support at least `1.2x` reward-min shares under `max_share_ratio` (default 2%): required external top shares per side = `baseline * (1-r)/r`.
+  - if either side fails that baseline ratio gate, bot cancels both sides for the market and waits; quoting resumes only after both sides become feasible again.
+
 - `mm_rewards_v1` + `mm_sport_v1` pending-order reconciliation now treats exchange unknown terminal states (notably `INVALID`) as terminal instead of `OPEN` (`src/main.rs`, `src/trader.rs`):
   - shared terminal helpers now classify unknown status strings into `FILLED` / `CANCELED` / `STALE`; `INVALID` maps to `STALE`.
   - MM stale-check paths now consider `Unmatched` and terminal unknown statuses as terminal for cleanup.

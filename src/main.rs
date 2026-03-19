@@ -1014,7 +1014,7 @@ fn mm_sport_size_shares_from_pending(row: &PendingOrderRecord) -> Option<f64> {
     (shares.is_finite() && shares > 0.0).then_some(shares)
 }
 
-const MM_SPORT_LOW_DEPTH_FLOOR_USD: f64 = 30_000.0;
+const MM_SPORT_LOW_DEPTH_FLOOR_USD: f64 = 50_000.0;
 const MM_SPORT_LOW_DEPTH_QUOTE_SIZE_MULT: f64 = 1.2;
 const MM_SPORT_FORCE_EXIT_WINDOW_MS: i64 = 5 * 60 * 1_000;
 const MM_SPORT_EXIT_FALLBACK_REFRESH_MS: i64 = 60_000;
@@ -13317,18 +13317,20 @@ async fn main() -> Result<()> {
                             }
                             let up_best_bid = up_best_bid.unwrap_or(0.0);
                             let down_best_bid = down_best_bid.unwrap_or(0.0);
-                            let (_, up_ext_top_bid_usd) = mm_sport_external_top_bid_depth(
-                                up_buy_rows.as_slice(),
-                                up_best_bid,
-                                up_best_bid_size,
-                                market.minimum_tick_size,
-                            );
-                            let (_, down_ext_top_bid_usd) = mm_sport_external_top_bid_depth(
-                                down_buy_rows.as_slice(),
-                                down_best_bid,
-                                down_best_bid_size,
-                                market.minimum_tick_size,
-                            );
+                            let (up_ext_top_bid_shares, up_ext_top_bid_usd) =
+                                mm_sport_external_top_bid_depth(
+                                    up_buy_rows.as_slice(),
+                                    up_best_bid,
+                                    up_best_bid_size,
+                                    market.minimum_tick_size,
+                                );
+                            let (down_ext_top_bid_shares, down_ext_top_bid_usd) =
+                                mm_sport_external_top_bid_depth(
+                                    down_buy_rows.as_slice(),
+                                    down_best_bid,
+                                    down_best_bid_size,
+                                    market.minimum_tick_size,
+                                );
                             let pair_min_top_depth_usd =
                                 up_ext_top_bid_usd.min(down_ext_top_bid_usd);
                             if !pair_min_top_depth_usd.is_finite()
@@ -13357,6 +13359,43 @@ async fn main() -> Result<()> {
                             }
                             if pair_min_top_depth_usd < mm_sport_cfg_for_loop.min_top_depth_usd {
                                 market_quote_size_mult = MM_SPORT_LOW_DEPTH_QUOTE_SIZE_MULT;
+                            }
+
+                            // Hard pair-level gate: only quote this market when both outcomes
+                            // can support the baseline 1.2x reward size under max_share_ratio.
+                            // If either side cannot support baseline size at ratio cap, cancel
+                            // both sides and stay out until depth recovers.
+                            let baseline_shares = (market.reward_min_size_shares
+                                * MM_SPORT_LOW_DEPTH_QUOTE_SIZE_MULT)
+                                .max(1.0);
+                            let ratio = mm_sport_cfg_for_loop.max_share_ratio.clamp(0.01, 0.99);
+                            let required_ext_top_shares =
+                                (baseline_shares * (1.0 - ratio) / ratio).max(0.0);
+                            let pair_ratio_feasible = up_ext_top_bid_shares + 1e-9
+                                >= required_ext_top_shares
+                                && down_ext_top_bid_shares + 1e-9 >= required_ext_top_shares;
+                            if !pair_ratio_feasible {
+                                if !market_rows.is_empty() {
+                                    let _ = mm_sport_cancel_pending_rows(
+                                        &api_for_mm_sport,
+                                        &tracking_db_for_mm_sport,
+                                        market_rows.as_slice(),
+                                    )
+                                    .await;
+                                }
+                                log_event(
+                                    "mm_sport_skip_pair_ratio_baseline_infeasible",
+                                    json!({
+                                        "strategy_id": STRATEGY_ID_MM_SPORT_V1,
+                                        "condition_id": market.condition_id,
+                                        "baseline_shares": baseline_shares,
+                                        "max_share_ratio": ratio,
+                                        "required_ext_top_shares": required_ext_top_shares,
+                                        "up_ext_top_bid_shares": up_ext_top_bid_shares,
+                                        "down_ext_top_bid_shares": down_ext_top_bid_shares
+                                    }),
+                                );
+                                continue;
                             }
                         }
 
