@@ -77,6 +77,12 @@ Older entries may reference env keys that were removed in later commits.
 
 ### 2026-03-19
 
+- `mm_sport_v1` internal budget caps were removed from live quoting (`src/main.rs`):
+  - removed MM Sport balance/allowance-derived BUY budget accounting and all budget-driven quote scaling/fallback branches.
+  - quote size is now governed by configured strategy size plus existing depth/ratio/min-size gates only.
+  - retained runtime safety for real exchange capacity failures (`mm_sport_buy_backoff_balance_allowance` + pair cancel on insufficient balance/allowance errors).
+  - affected scope: MM Sport pregame rewards markets across all discovered sports match conditions.
+
 - `mm_sport_v1` budget gating and collateral allowance parsing were hardened to prevent false zero-budget starvation (`src/main.rs`, `src/api.rs`):
   - MM Sport now reserves budget against its own active BUY notional only (instead of all strategies), so `mm_rewards_v1` open BUYs do not zero out MM Sport quote capacity.
   - USDC allowance lookup now falls back to the max allowance reported by CLOB when the configured exchange key resolves to zero/missing.
@@ -133,6 +139,18 @@ Older entries may reference env keys that were removed in later commits.
   - prestart SELL exits now bypass reward `min_size` floor and enforce exchange min-order floor only, preventing stuck sub-reward inventory during the `T-60m` to start exit window.
   - added forced `T-5m` exit mode: if inventory remains, MM Sport places one non-post-only SELL limit targeting level-2 bid (fallback level-1 when needed) to prioritize immediate flattening.
   - affects `mm_sport_v1` sports pregame inventory-exit path across all discovered symbols/markets; normal two-outcome BUY quoting logic is unchanged.
+
+- `mm_sport_v1` budget handling now preserves valid live quotes and avoids collateral-starvation churn (`src/main.rs`):
+  - pair-level budget gating now uses `effective_remaining_budget_usd = remaining_budget_usd + existing_market_buy_notional_usd` so already-posted MM Sport BUYs are treated as reusable budget during requote checks.
+  - when configured high multiplier (for example `EVPOLY_MM_SPORT_QUOTE_SIZE_MULT=10`) exceeds current effective budget, quoting falls back to baseline `1.2x` reward min-size before hard scaling to zero.
+  - token-level budget clamps now also credit existing same-token BUY notional, preventing unnecessary cancel/repost loops caused by treating current live orders as fresh budget demand.
+  - affects `mm_sport_v1` normal two-outcome BUY quoting only; fill-pause and inventory-exit behavior are unchanged.
+
+- `mm_sport_v1` ratio-breach handling now hard-pauses affected markets for 15 minutes to stop cancel churn (`src/main.rs`, `.env`):
+  - when pair ratio checks fail (`mm_sport_skip_pair_ratio_limit_exceeded` or runtime `..._runtime`), MM Sport now cancels current orders for that condition and sets a 15-minute condition pause before re-checking.
+  - added explicit `ratio_pause_until_ms` telemetry field on both ratio-breach events.
+  - live runtime override updated to `EVPOLY_MM_SPORT_MAX_SHARE_RATIO=0.05` in `.env` (previously `0.01`).
+  - affects `mm_sport_v1` sports normal quoting path; fill-trigger pause (`EVPOLY_MM_SPORT_PAUSE_AFTER_FILL_SEC`) is unchanged.
 
 ### 2026-03-18
 
