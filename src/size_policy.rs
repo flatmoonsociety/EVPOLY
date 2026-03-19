@@ -1,6 +1,10 @@
 use crate::strategy::Timeframe;
+use std::sync::OnceLock;
 
 const DEFAULT_BASE_SIZE_USD: f64 = 10.0;
+const DEFAULT_ENDGAME_TICK_MULTIPLIERS: [f64; 3] = [0.20, 0.40, 0.40];
+const DEFAULT_SESSIONBAND_TAU2_MULTIPLIER: f64 = 0.30;
+const DEFAULT_SESSIONBAND_TAU1_MULTIPLIER: f64 = 0.70;
 
 pub fn base_size_usd_from_env(env_key: &str) -> f64 {
     std::env::var(env_key)
@@ -37,20 +41,66 @@ pub fn evcurve_timeframe_multiplier(timeframe: Timeframe) -> f64 {
 }
 
 pub fn endgame_tick_multiplier(tick_index: u32) -> Option<f64> {
+    let multipliers = endgame_tick_multipliers();
     match tick_index {
-        0 => Some(0.20),
-        1 => Some(0.40),
-        2 => Some(0.40),
+        0 => Some(multipliers[0]),
+        1 => Some(multipliers[1]),
+        2 => Some(multipliers[2]),
         _ => None,
     }
 }
 
 pub fn sessionband_tau_multiplier(tau_sec: i64) -> Option<f64> {
+    let (tau2_multiplier, tau1_multiplier) = sessionband_tau_multipliers();
     match tau_sec {
-        2 => Some(0.30),
-        1 => Some(0.70),
+        2 => Some(tau2_multiplier),
+        1 => Some(tau1_multiplier),
         _ => None,
     }
+}
+
+fn endgame_tick_multipliers() -> &'static [f64; 3] {
+    static MULTIPLIERS: OnceLock<[f64; 3]> = OnceLock::new();
+    MULTIPLIERS.get_or_init(|| {
+        [
+            env_nonnegative_f64(
+                "EVPOLY_ENDGAME_TICK0_MULTIPLIER",
+                DEFAULT_ENDGAME_TICK_MULTIPLIERS[0],
+            ),
+            env_nonnegative_f64(
+                "EVPOLY_ENDGAME_TICK1_MULTIPLIER",
+                DEFAULT_ENDGAME_TICK_MULTIPLIERS[1],
+            ),
+            env_nonnegative_f64(
+                "EVPOLY_ENDGAME_TICK2_MULTIPLIER",
+                DEFAULT_ENDGAME_TICK_MULTIPLIERS[2],
+            ),
+        ]
+    })
+}
+
+fn sessionband_tau_multipliers() -> (f64, f64) {
+    static MULTIPLIERS: OnceLock<(f64, f64)> = OnceLock::new();
+    *MULTIPLIERS.get_or_init(|| {
+        (
+            env_nonnegative_f64(
+                "EVPOLY_SESSIONBAND_TAU2_MULTIPLIER",
+                DEFAULT_SESSIONBAND_TAU2_MULTIPLIER,
+            ),
+            env_nonnegative_f64(
+                "EVPOLY_SESSIONBAND_TAU1_MULTIPLIER",
+                DEFAULT_SESSIONBAND_TAU1_MULTIPLIER,
+            ),
+        )
+    })
+}
+
+fn env_nonnegative_f64(env_key: &str, default: f64) -> f64 {
+    std::env::var(env_key)
+        .ok()
+        .and_then(|value| value.trim().parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .unwrap_or(default)
 }
 
 pub fn strategy_symbol_size_usd(base_size_usd: f64, symbol: &str) -> f64 {

@@ -25350,6 +25350,57 @@ async fn main() -> Result<()> {
         }
     });
 
+    if !is_simulation && api.ws_enabled() && env_bool_named("EVPOLY_STRATEGY_EVCURVE_ENABLE", true)
+    {
+        let trader_evcurve_fill = trader_clone.clone();
+        let polymarket_ws_evcurve_fill = polymarket_ws_state.clone();
+        let evcurve_fill_fallback_poll_ms = std::env::var("EVPOLY_EVCURVE_FILL_FALLBACK_POLL_MS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(1500)
+            .clamp(250, 60_000);
+        tokio::spawn(async move {
+            let mut last_user_event_ms = polymarket_ws_evcurve_fill.last_user_msg_ms();
+            let mut last_timeout_log_ms = 0_i64;
+            loop {
+                let now_ms = chrono::Utc::now().timestamp_millis();
+                let wait_result = timeout(
+                    Duration::from_millis(evcurve_fill_fallback_poll_ms),
+                    polymarket_ws_evcurve_fill.wait_for_user_update_after(last_user_event_ms),
+                )
+                .await;
+                match wait_result {
+                    Ok(updated_ms) => {
+                        last_user_event_ms = updated_ms;
+                    }
+                    Err(_) => {
+                        if now_ms.saturating_sub(last_timeout_log_ms) >= 30_000 {
+                            last_timeout_log_ms = now_ms;
+                            log_event(
+                                "evcurve_fill_monitor_poll_fallback",
+                                json!({
+                                    "strategy_id": STRATEGY_ID_EVCURVE_V1,
+                                    "fallback_poll_ms": evcurve_fill_fallback_poll_ms,
+                                    "last_user_event_ms": last_user_event_ms
+                                }),
+                            );
+                        }
+                    }
+                }
+                if let Err(e) = trader_evcurve_fill
+                    .reconcile_evcurve_pending_orders_ws_fallback()
+                    .await
+                {
+                    warn!("EVcurve WSS fill reconcile failed: {}", e);
+                }
+            }
+        });
+        eprintln!(
+            "📈 EVcurve fill monitor enabled (WSS + poll fallback {}ms)",
+            evcurve_fill_fallback_poll_ms
+        );
+    }
+
     // Start a separate background task for summary logging so it cannot block pending checks
     let trader_summary = trader_clone.clone();
     tokio::spawn(async move {
@@ -26851,13 +26902,66 @@ fn premarket_submit_cap_per_token() -> usize {
 }
 
 fn premarket_fixed_ladder_prices() -> &'static [f64] {
-    const PRICES: [f64; 6] = [0.40, 0.30, 0.24, 0.21, 0.15, 0.12];
-    &PRICES
+    const DEFAULT: [f64; 6] = [0.40, 0.30, 0.24, 0.21, 0.15, 0.12];
+    static PRICES: OnceLock<Vec<f64>> = OnceLock::new();
+    PRICES
+        .get_or_init(|| {
+            parse_csv_f64_env_named("EVPOLY_PREMARKET_FIXED_LADDER_PRICES", false)
+                .unwrap_or_else(|| DEFAULT.to_vec())
+        })
+        .as_slice()
 }
 
 fn premarket_fixed_ladder_weights() -> &'static [f64] {
-    const WEIGHTS: [f64; 6] = [0.23, 0.23, 0.17, 0.14, 0.12, 0.11];
-    &WEIGHTS
+    const DEFAULT: [f64; 6] = [0.23, 0.23, 0.17, 0.14, 0.12, 0.11];
+    static WEIGHTS: OnceLock<Vec<f64>> = OnceLock::new();
+    WEIGHTS
+        .get_or_init(|| {
+            parse_csv_f64_env_named("EVPOLY_PREMARKET_FIXED_LADDER_WEIGHTS", true)
+                .unwrap_or_else(|| DEFAULT.to_vec())
+        })
+        .as_slice()
+}
+
+fn parse_csv_f64_env_named(env_key: &str, allow_zero: bool) -> Option<Vec<f64>> {
+    let raw = env_nonempty_named(env_key)?;
+    let mut values = Vec::new();
+    for segment in raw.split(',') {
+        let trimmed = segment.trim();
+        if trimmed.is_empty() {
+            warn!(
+                "{} is invalid (empty CSV segment); using code default",
+                env_key
+            );
+            return None;
+        }
+        let Ok(parsed) = trimmed.parse::<f64>() else {
+            warn!(
+                "{} is invalid (failed to parse '{}' as float); using code default",
+                env_key, trimmed
+            );
+            return None;
+        };
+        let is_valid = parsed.is_finite() && (parsed > 0.0 || (allow_zero && parsed >= 0.0));
+        if !is_valid {
+            warn!(
+                "{} is invalid (value '{}' must be {}); using code default",
+                env_key,
+                trimmed,
+                if allow_zero { ">= 0" } else { "> 0" }
+            );
+            return None;
+        }
+        values.push(parsed);
+    }
+    if values.is_empty() {
+        warn!(
+            "{} is invalid (empty CSV value list); using code default",
+            env_key
+        );
+        return None;
+    }
+    Some(values)
 }
 
 fn build_premarket_fixed_rungs(

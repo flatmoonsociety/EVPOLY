@@ -77,6 +77,24 @@ Older entries may reference env keys that were removed in later commits.
 
 ### 2026-03-19
 
+- Shared sizing-policy defaults are now env-overridable while keeping the same code defaults (`src/main.rs`, `src/size_policy.rs`, `.env.example`, `.env.full.example`):
+  - `premarket_v1` fixed ladder can now be overridden via:
+    - `EVPOLY_PREMARKET_FIXED_LADDER_PRICES` (default `0.40,0.30,0.24,0.21,0.15,0.12`)
+    - `EVPOLY_PREMARKET_FIXED_LADDER_WEIGHTS` (default `0.23,0.23,0.17,0.14,0.12,0.11`)
+  - `endgame_sweep_v1` per-tick split can now be overridden via:
+    - `EVPOLY_ENDGAME_TICK0_MULTIPLIER` (default `0.20`)
+    - `EVPOLY_ENDGAME_TICK1_MULTIPLIER` (default `0.40`)
+    - `EVPOLY_ENDGAME_TICK2_MULTIPLIER` (default `0.40`)
+  - `sessionband_v1` tau multipliers can now be overridden via:
+    - `EVPOLY_SESSIONBAND_TAU2_MULTIPLIER` (default `0.30`)
+    - `EVPOLY_SESSIONBAND_TAU1_MULTIPLIER` (default `0.70`)
+  - invalid env values fail closed to existing code defaults (no behavior change unless valid override is set).
+
+- `evcurve_v1` fill-state tracking now has an explicit WSS-driven reconcile loop with polling fallback (`src/main.rs`, `src/trader.rs`, `.env.example`, `.env.full.example`):
+  - when Polymarket WS is enabled, runtime now wakes on user-channel events and reconciles EVcurve pending orders via `api.get_order` (WS snapshot first, API fallback).
+  - polling fallback is controlled by `EVPOLY_EVCURVE_FILL_FALLBACK_POLL_MS` (default `1500ms`) so fills still reconcile without fresh WS events.
+  - existing global periodic reconcile path remains unchanged as a safety backstop.
+
 - `mm_sport_v1` prestart inventory-exit reliability hardening (`src/main.rs`):
   - added tolerant `game_start_time` parsing fallback formats so MM Sport can resolve start timestamps even when feeds return non-strict RFC3339 datetime strings.
   - added inventory-condition fallback refresh (`60s`) so open MM Sport positions can still enter prestart exit handling even if a condition temporarily falls out of normal reward discovery scope.

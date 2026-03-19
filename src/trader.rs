@@ -9,6 +9,7 @@ use crate::event_log::log_event;
 use crate::models::*;
 use crate::signal_state::SharedSignalState;
 use crate::simulation::SimulationTracker;
+use crate::strategy::STRATEGY_ID_EVCURVE_V1;
 use crate::tracking_db::{
     MmWalletInventoryRow, PendingOrderRecord, TrackingDb, TradeEventRecord,
     WalletCashflowEventRecord,
@@ -2269,6 +2270,30 @@ impl Trader {
     }
 
     async fn reconcile_active_pending_orders_with_exchange(&self) -> Result<()> {
+        self.reconcile_active_pending_orders_with_exchange_filtered(None)
+            .await
+    }
+
+    pub async fn reconcile_active_pending_orders_for_strategy(
+        &self,
+        strategy_id: &str,
+    ) -> Result<()> {
+        let normalized_strategy_id = Self::normalize_strategy_id(Some(strategy_id));
+        self.reconcile_active_pending_orders_with_exchange_filtered(Some(
+            normalized_strategy_id.as_str(),
+        ))
+        .await
+    }
+
+    pub async fn reconcile_evcurve_pending_orders_ws_fallback(&self) -> Result<()> {
+        self.reconcile_active_pending_orders_for_strategy(STRATEGY_ID_EVCURVE_V1)
+            .await
+    }
+
+    async fn reconcile_active_pending_orders_with_exchange_filtered(
+        &self,
+        strategy_filter: Option<&str>,
+    ) -> Result<()> {
         if self.simulation_mode {
             return Ok(());
         }
@@ -2287,6 +2312,11 @@ impl Trader {
         }
         let mut batched_status_updates: Vec<(String, String)> = Vec::new();
         for row in reconcile_rows {
+            if let Some(filter) = strategy_filter {
+                if !row.strategy_id.eq_ignore_ascii_case(filter) {
+                    continue;
+                }
+            }
             if !Self::is_exchange_order_id(&row.order_id) {
                 batched_status_updates.push((row.order_id.clone(), "STALE".to_string()));
                 continue;
