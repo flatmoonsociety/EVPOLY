@@ -77,6 +77,12 @@ Older entries may reference env keys that were removed in later commits.
 
 ### 2026-03-19
 
+- `mm_sport_v1` discovery loop was hardened against CLOB rate-limit starvation (`src/main.rs`):
+  - discovery no longer re-hammers every ~1s when no markets are selected; it now uses exponential backoff (`5s` to `5m`) for empty/error refreshes and tracks `next_discovery_attempt_ms`.
+  - when CLOB market-detail fetch is rate-limited, strategy now falls back to Gamma slug lookup (`get_market_by_slug`) to recover token ids + game time and keep discovery alive.
+  - added explicit rate-limit telemetry via `mm_sport_discovery_rate_limited` plus richer `mm_sport_discovery_refresh` counters (`clob_detail_rate_limited`, fallback counts, cache usage, backoff timing).
+  - discovery keeps and reuses last-good market set during transient detail-fetch failures to avoid dropping active scope to zero.
+
 - `mm_sport_v1` internal budget caps were removed from live quoting (`src/main.rs`):
   - removed MM Sport balance/allowance-derived BUY budget accounting and all budget-driven quote scaling/fallback branches.
   - quote size is now governed by configured strategy size plus existing depth/ratio/min-size gates only.

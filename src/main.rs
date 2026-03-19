@@ -193,6 +193,26 @@ struct MmSportMarket {
     down_token_id: String,
 }
 
+#[derive(Debug, Clone, Default)]
+struct MmSportDiscoveryReport {
+    rewards_rows: usize,
+    skipped_low_reward_rate: usize,
+    skipped_inactive_or_closed: usize,
+    skipped_non_sports: usize,
+    skipped_non_match: usize,
+    skipped_not_pregame: usize,
+    skipped_not_reward_eligible: usize,
+    skipped_missing_tokens: usize,
+    clob_detail_ok: usize,
+    clob_detail_error: usize,
+    clob_detail_rate_limited: usize,
+    gamma_fallback_ok: usize,
+    gamma_fallback_error: usize,
+    selected_markets: usize,
+    selected_via_gamma_fallback: usize,
+    rate_limited_condition_ids: Vec<String>,
+}
+
 #[derive(Default, Debug, Clone, Copy)]
 struct ArbiterBatchEnqueueStats {
     sent: usize,
@@ -968,6 +988,14 @@ fn mm_sport_is_match_market(slug: &str, question: &str) -> bool {
     slug_vs || question_vs
 }
 
+fn mm_sport_error_looks_rate_limited(message: &str) -> bool {
+    let normalized = message.trim().to_ascii_lowercase();
+    normalized.contains("429")
+        || normalized.contains("1015")
+        || normalized.contains("too many requests")
+        || normalized.contains("rate limit")
+}
+
 fn mm_sport_extract_binary_token_ids(
     tokens: &[polymarket_arbitrage_bot::models::MarketToken],
 ) -> Option<(String, String)> {
@@ -981,6 +1009,42 @@ fn mm_sport_extract_binary_token_ids(
             continue;
         }
         ids.push(token_id.to_string());
+    }
+    if ids.len() < 2 {
+        return None;
+    }
+    Some((ids[0].clone(), ids[1].clone()))
+}
+
+fn mm_sport_extract_binary_token_ids_from_gamma(market: &Market) -> Option<(String, String)> {
+    let mut ids = Vec::new();
+    if let Some(tokens) = market.tokens.as_ref() {
+        for token in tokens {
+            let token_id = token.token_id.trim();
+            if token_id.is_empty() {
+                continue;
+            }
+            if ids.iter().any(|existing: &String| existing == token_id) {
+                continue;
+            }
+            ids.push(token_id.to_string());
+        }
+    }
+    if ids.len() < 2 {
+        if let Some(raw_clob_token_ids) = market.clob_token_ids.as_ref() {
+            if let Ok(parsed) = serde_json::from_str::<Vec<String>>(raw_clob_token_ids) {
+                for token_id in parsed {
+                    let normalized = token_id.trim();
+                    if normalized.is_empty() {
+                        continue;
+                    }
+                    if ids.iter().any(|existing: &String| existing == normalized) {
+                        continue;
+                    }
+                    ids.push(normalized.to_string());
+                }
+            }
+        }
     }
     if ids.len() < 2 {
         return None;
@@ -1019,6 +1083,8 @@ const MM_SPORT_LOW_DEPTH_QUOTE_SIZE_MULT: f64 = 1.2;
 const MM_SPORT_RATIO_BREACH_PAUSE_MS: i64 = 15 * 60 * 1_000;
 const MM_SPORT_FORCE_EXIT_WINDOW_MS: i64 = 5 * 60 * 1_000;
 const MM_SPORT_EXIT_FALLBACK_REFRESH_MS: i64 = 60_000;
+const MM_SPORT_DISCOVERY_EMPTY_BACKOFF_MIN_MS: i64 = 5_000;
+const MM_SPORT_DISCOVERY_EMPTY_BACKOFF_MAX_MS: i64 = 5 * 60 * 1_000;
 
 fn mm_sport_external_top_bid_depth(
     buy_rows: &[PendingOrderRecord],
@@ -1158,82 +1224,194 @@ async fn mm_sport_place_order(
 async fn mm_sport_discover_markets(
     api: &PolymarketApi,
     cfg: &mm::MmSportConfig,
-) -> Result<Vec<MmSportMarket>> {
+) -> Result<(Vec<MmSportMarket>, MmSportDiscoveryReport)> {
     let now_ms = chrono::Utc::now().timestamp_millis();
+    let mut report = MmSportDiscoveryReport::default();
     let rewards_rows = api
         .get_rewards_markets_api(cfg.rewards_page_budget, None, None, true)
         .await?;
+    report.rewards_rows = rewards_rows.len();
     let mut markets = Vec::new();
     for row in rewards_rows {
         let reward_rate = row.reward_rate_hint();
         if !reward_rate.is_finite() || reward_rate < cfg.min_reward_rate_per_day {
+            report.skipped_low_reward_rate = report.skipped_low_reward_rate.saturating_add(1);
             continue;
         }
         let condition_id = row.condition_id.trim();
         if condition_id.is_empty() {
+            report.skipped_missing_tokens = report.skipped_missing_tokens.saturating_add(1);
             continue;
         }
-        let details = match api.get_market_via_proxy_pool(condition_id).await {
-            Ok(value) => value,
-            Err(_) => continue,
-        };
-        if !details.active || details.closed || !details.accepting_orders {
+        let mut reward_min_size_shares = row
+            .rewards_min_size
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .unwrap_or(0.0);
+        let mut reward_max_spread = row
+            .rewards_max_spread
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .unwrap_or(0.0);
+
+        let mut market_slug = row.market_slug.clone();
+        let mut question = row.question.clone().unwrap_or_default();
+        let mut tags: Vec<String> = Vec::new();
+        let mut game_start_ts_ms = 0_i64;
+        let mut minimum_tick_size = 0.01_f64;
+        let mut minimum_order_size_usd = 1.0_f64;
+        let mut up_token_id = String::new();
+        let mut down_token_id = String::new();
+        let mut active = false;
+        let mut closed = true;
+        let mut accepting_orders = false;
+        let mut selected_via_gamma_fallback = false;
+
+        match api.get_market_via_proxy_pool(condition_id).await {
+            Ok(details) => {
+                report.clob_detail_ok = report.clob_detail_ok.saturating_add(1);
+                active = details.active;
+                closed = details.closed;
+                accepting_orders = details.accepting_orders;
+                market_slug = details.market_slug.clone();
+                question = details.question.clone();
+                tags = details.tags.clone();
+                game_start_ts_ms = details
+                    .game_start_time
+                    .as_deref()
+                    .and_then(parse_rfc3339_to_ts_ms)
+                    .or_else(|| parse_rfc3339_to_ts_ms(details.end_date_iso.as_str()))
+                    .unwrap_or(0);
+                let (up, down) = match mm_sport_extract_binary_token_ids(&details.tokens) {
+                    Some(value) => value,
+                    None => {
+                        report.skipped_missing_tokens =
+                            report.skipped_missing_tokens.saturating_add(1);
+                        continue;
+                    }
+                };
+                up_token_id = up;
+                down_token_id = down;
+                if let Some(value) = f64::try_from(details.rewards.min_size)
+                    .ok()
+                    .filter(|v| v.is_finite() && *v > 0.0)
+                {
+                    reward_min_size_shares = value;
+                }
+                if let Some(value) = f64::try_from(details.rewards.max_spread)
+                    .ok()
+                    .filter(|v| v.is_finite() && *v > 0.0)
+                {
+                    reward_max_spread = value;
+                }
+                minimum_tick_size = f64::try_from(details.minimum_tick_size)
+                    .ok()
+                    .filter(|v| v.is_finite() && *v > 0.0)
+                    .unwrap_or(0.01);
+                minimum_order_size_usd = f64::try_from(details.minimum_order_size)
+                    .ok()
+                    .filter(|v| v.is_finite() && *v > 0.0)
+                    .unwrap_or(1.0);
+            }
+            Err(e) => {
+                report.clob_detail_error = report.clob_detail_error.saturating_add(1);
+                let error_text = e.to_string();
+                if mm_sport_error_looks_rate_limited(error_text.as_str()) {
+                    report.clob_detail_rate_limited =
+                        report.clob_detail_rate_limited.saturating_add(1);
+                    if report.rate_limited_condition_ids.len() < 10
+                        && !report
+                            .rate_limited_condition_ids
+                            .iter()
+                            .any(|existing| existing.eq_ignore_ascii_case(condition_id))
+                    {
+                        report
+                            .rate_limited_condition_ids
+                            .push(condition_id.to_string());
+                    }
+                }
+
+                match api.get_market_by_slug(row.market_slug.as_str()).await {
+                    Ok(gamma_market) => {
+                        report.gamma_fallback_ok = report.gamma_fallback_ok.saturating_add(1);
+                        selected_via_gamma_fallback = true;
+                        active = gamma_market.active;
+                        closed = gamma_market.closed;
+                        accepting_orders = gamma_market.active && !gamma_market.closed;
+                        if !gamma_market.slug.trim().is_empty() {
+                            market_slug = gamma_market.slug.trim().to_string();
+                        }
+                        if !gamma_market.question.trim().is_empty() {
+                            question = gamma_market.question.trim().to_string();
+                        }
+                        game_start_ts_ms = gamma_market
+                            .end_date_iso
+                            .as_deref()
+                            .and_then(parse_rfc3339_to_ts_ms)
+                            .or_else(|| {
+                                gamma_market
+                                    .end_date_iso_alt
+                                    .as_deref()
+                                    .and_then(parse_rfc3339_to_ts_ms)
+                            })
+                            .or_else(|| {
+                                gamma_market
+                                    .end_date
+                                    .as_deref()
+                                    .and_then(parse_rfc3339_to_ts_ms)
+                            })
+                            .unwrap_or(0);
+                        let (up, down) =
+                            match mm_sport_extract_binary_token_ids_from_gamma(&gamma_market) {
+                                Some(value) => value,
+                                None => {
+                                    report.skipped_missing_tokens =
+                                        report.skipped_missing_tokens.saturating_add(1);
+                                    continue;
+                                }
+                            };
+                        up_token_id = up;
+                        down_token_id = down;
+                    }
+                    Err(_) => {
+                        report.gamma_fallback_error = report.gamma_fallback_error.saturating_add(1);
+                        continue;
+                    }
+                }
+            }
+        }
+
+        if !active || closed || !accepting_orders {
+            report.skipped_inactive_or_closed = report.skipped_inactive_or_closed.saturating_add(1);
             continue;
         }
         if !mm_sport_is_sports_market(
-            details.tags.as_slice(),
-            details.market_slug.as_str(),
+            tags.as_slice(),
+            market_slug.as_str(),
             row.market_slug.as_str(),
         ) {
+            report.skipped_non_sports = report.skipped_non_sports.saturating_add(1);
             continue;
         }
-        let question = details.question.trim();
-        if cfg.match_only && !mm_sport_is_match_market(details.market_slug.as_str(), question) {
+        if cfg.match_only && !mm_sport_is_match_market(market_slug.as_str(), question.as_str()) {
+            report.skipped_non_match = report.skipped_non_match.saturating_add(1);
             continue;
         }
-        let game_start_ts_ms = details
-            .game_start_time
-            .as_deref()
-            .and_then(parse_rfc3339_to_ts_ms)
-            .or_else(|| parse_rfc3339_to_ts_ms(details.end_date_iso.as_str()))
-            .unwrap_or(0);
         if cfg.pregame_only && (game_start_ts_ms <= 0 || game_start_ts_ms <= now_ms) {
+            report.skipped_not_pregame = report.skipped_not_pregame.saturating_add(1);
             continue;
         }
-        let (up_token_id, down_token_id) = match mm_sport_extract_binary_token_ids(&details.tokens)
-        {
-            Some(value) => value,
-            None => continue,
-        };
-        let reward_min_size_shares = f64::try_from(details.rewards.min_size)
-            .ok()
-            .filter(|v| v.is_finite() && *v > 0.0)
-            .or_else(|| row.rewards_min_size.filter(|v| v.is_finite() && *v > 0.0))
-            .unwrap_or(0.0);
-        let reward_max_spread = f64::try_from(details.rewards.max_spread)
-            .ok()
-            .filter(|v| v.is_finite() && *v > 0.0)
-            .or_else(|| row.rewards_max_spread.filter(|v| v.is_finite() && *v > 0.0))
-            .unwrap_or(0.0);
         if cfg.require_reward_eligible
             && (reward_min_size_shares <= 0.0 || reward_max_spread <= 0.0)
         {
+            report.skipped_not_reward_eligible =
+                report.skipped_not_reward_eligible.saturating_add(1);
             continue;
         }
-        let minimum_tick_size = f64::try_from(details.minimum_tick_size)
-            .ok()
-            .filter(|v| v.is_finite() && *v > 0.0)
-            .unwrap_or(0.01);
-        let minimum_order_size_usd = f64::try_from(details.minimum_order_size)
-            .ok()
-            .filter(|v| v.is_finite() && *v > 0.0)
-            .unwrap_or(1.0);
         let period_timestamp = u64::try_from((game_start_ts_ms / 1_000).max(0))
             .ok()
             .unwrap_or(0);
         markets.push(MmSportMarket {
             condition_id: condition_id.to_string(),
-            market_slug: details.market_slug.clone(),
+            market_slug,
             reward_rate_per_day: reward_rate,
             reward_min_size_shares,
             minimum_tick_size,
@@ -1243,6 +1421,10 @@ async fn mm_sport_discover_markets(
             up_token_id,
             down_token_id,
         });
+        if selected_via_gamma_fallback {
+            report.selected_via_gamma_fallback =
+                report.selected_via_gamma_fallback.saturating_add(1);
+        }
     }
     markets.sort_by(|a, b| {
         b.reward_rate_per_day
@@ -1252,7 +1434,8 @@ async fn mm_sport_discover_markets(
     if cfg.max_markets > 0 && markets.len() > cfg.max_markets {
         markets.truncate(cfg.max_markets);
     }
-    Ok(markets)
+    report.selected_markets = markets.len();
+    Ok((markets, report))
 }
 
 fn admin_api_enabled() -> bool {
@@ -12715,7 +12898,10 @@ async fn main() -> Result<()> {
             let mm_sport_cfg_for_loop = mm_sport_cfg.clone();
             tokio::spawn(async move {
                 let mut discovered_markets: Vec<MmSportMarket> = Vec::new();
+                let mut last_good_discovered_markets: Vec<MmSportMarket> = Vec::new();
                 let mut last_discovery_ms = 0_i64;
+                let mut next_discovery_attempt_ms = 0_i64;
+                let mut discovery_backoff_ms = MM_SPORT_DISCOVERY_EMPTY_BACKOFF_MIN_MS;
                 let mut last_market_event_ms = polymarket_ws_for_mm_sport.last_market_msg_ms();
                 let mut last_user_event_ms = polymarket_ws_for_mm_sport.last_user_msg_ms();
                 let mut last_event_wait_timeout_log_ms = 0_i64;
@@ -12814,8 +13000,9 @@ async fn main() -> Result<()> {
                     )
                     .ok()
                     .unwrap_or(3_600_000);
-                    let should_refresh_discovery = discovered_markets.is_empty()
-                        || now_ms.saturating_sub(last_discovery_ms) >= refresh_interval_ms;
+                    let should_refresh_discovery = now_ms >= next_discovery_attempt_ms
+                        && (discovered_markets.is_empty()
+                            || now_ms.saturating_sub(last_discovery_ms) >= refresh_interval_ms);
                     if should_refresh_discovery {
                         match mm_sport_discover_markets(
                             &api_for_mm_sport,
@@ -12823,9 +13010,42 @@ async fn main() -> Result<()> {
                         )
                         .await
                         {
-                            Ok(markets) => {
+                            Ok((markets, discovery_report)) => {
                                 last_discovery_ms = now_ms;
-                                discovered_markets = markets;
+                                let selected_market_count = markets.len();
+                                let mut using_cached_markets = false;
+                                if selected_market_count > 0 {
+                                    discovered_markets = markets.clone();
+                                    last_good_discovered_markets = markets;
+                                    discovery_backoff_ms = MM_SPORT_DISCOVERY_EMPTY_BACKOFF_MIN_MS;
+                                    next_discovery_attempt_ms =
+                                        now_ms.saturating_add(refresh_interval_ms);
+                                } else {
+                                    if !last_good_discovered_markets.is_empty() {
+                                        discovered_markets = last_good_discovered_markets.clone();
+                                        using_cached_markets = true;
+                                    } else {
+                                        discovered_markets.clear();
+                                    }
+                                    let had_detail_failure = discovery_report.clob_detail_error > 0
+                                        || discovery_report.gamma_fallback_error > 0;
+                                    let had_rate_limit =
+                                        discovery_report.clob_detail_rate_limited > 0;
+                                    if had_detail_failure || had_rate_limit {
+                                        discovery_backoff_ms =
+                                            (discovery_backoff_ms.saturating_mul(2)).clamp(
+                                                MM_SPORT_DISCOVERY_EMPTY_BACKOFF_MIN_MS,
+                                                MM_SPORT_DISCOVERY_EMPTY_BACKOFF_MAX_MS,
+                                            );
+                                        next_discovery_attempt_ms =
+                                            now_ms.saturating_add(discovery_backoff_ms);
+                                    } else {
+                                        discovery_backoff_ms =
+                                            MM_SPORT_DISCOVERY_EMPTY_BACKOFF_MIN_MS;
+                                        next_discovery_attempt_ms =
+                                            now_ms.saturating_add(refresh_interval_ms);
+                                    }
+                                }
                                 let mut scope_token_ids: std::collections::HashSet<String> =
                                     std::collections::HashSet::new();
                                 let mut scope_condition_ids: std::collections::HashSet<String> =
@@ -12860,19 +13080,67 @@ async fn main() -> Result<()> {
                                     json!({
                                         "strategy_id": STRATEGY_ID_MM_SPORT_V1,
                                         "market_count": discovered_markets.len(),
+                                        "selected_market_count": selected_market_count,
+                                        "using_cached_markets": using_cached_markets,
                                         "scope_token_count": wait_scope_token_ids.len(),
                                         "scope_market_count": wait_scope_condition_ids.len(),
                                         "min_reward_rate_per_day": mm_sport_cfg_for_loop.min_reward_rate_per_day,
-                                        "refresh_interval_ms": refresh_interval_ms
+                                        "refresh_interval_ms": refresh_interval_ms,
+                                        "next_discovery_attempt_ms": next_discovery_attempt_ms,
+                                        "discovery_backoff_ms": discovery_backoff_ms,
+                                        "rewards_rows": discovery_report.rewards_rows,
+                                        "skipped_low_reward_rate": discovery_report.skipped_low_reward_rate,
+                                        "skipped_inactive_or_closed": discovery_report.skipped_inactive_or_closed,
+                                        "skipped_non_sports": discovery_report.skipped_non_sports,
+                                        "skipped_non_match": discovery_report.skipped_non_match,
+                                        "skipped_not_pregame": discovery_report.skipped_not_pregame,
+                                        "skipped_not_reward_eligible": discovery_report.skipped_not_reward_eligible,
+                                        "skipped_missing_tokens": discovery_report.skipped_missing_tokens,
+                                        "clob_detail_ok": discovery_report.clob_detail_ok,
+                                        "clob_detail_error": discovery_report.clob_detail_error,
+                                        "clob_detail_rate_limited": discovery_report.clob_detail_rate_limited,
+                                        "gamma_fallback_ok": discovery_report.gamma_fallback_ok,
+                                        "gamma_fallback_error": discovery_report.gamma_fallback_error,
+                                        "selected_via_gamma_fallback": discovery_report.selected_via_gamma_fallback
                                     }),
                                 );
+                                if discovery_report.clob_detail_rate_limited > 0 {
+                                    log_event(
+                                        "mm_sport_discovery_rate_limited",
+                                        json!({
+                                            "strategy_id": STRATEGY_ID_MM_SPORT_V1,
+                                            "clob_detail_rate_limited": discovery_report.clob_detail_rate_limited,
+                                            "clob_detail_error": discovery_report.clob_detail_error,
+                                            "gamma_fallback_ok": discovery_report.gamma_fallback_ok,
+                                            "rate_limited_condition_ids": discovery_report.rate_limited_condition_ids,
+                                            "next_discovery_attempt_ms": next_discovery_attempt_ms,
+                                            "discovery_backoff_ms": discovery_backoff_ms,
+                                        }),
+                                    );
+                                }
                             }
                             Err(e) => {
+                                let rate_limited =
+                                    mm_sport_error_looks_rate_limited(e.to_string().as_str());
+                                discovery_backoff_ms = (discovery_backoff_ms.saturating_mul(2))
+                                    .clamp(
+                                        MM_SPORT_DISCOVERY_EMPTY_BACKOFF_MIN_MS,
+                                        MM_SPORT_DISCOVERY_EMPTY_BACKOFF_MAX_MS,
+                                    );
+                                next_discovery_attempt_ms =
+                                    now_ms.saturating_add(discovery_backoff_ms);
+                                if !last_good_discovered_markets.is_empty() {
+                                    discovered_markets = last_good_discovered_markets.clone();
+                                }
                                 log_event(
                                     "mm_sport_discovery_error",
                                     json!({
                                         "strategy_id": STRATEGY_ID_MM_SPORT_V1,
-                                        "error": e.to_string()
+                                        "error": e.to_string(),
+                                        "rate_limited": rate_limited,
+                                        "next_discovery_attempt_ms": next_discovery_attempt_ms,
+                                        "discovery_backoff_ms": discovery_backoff_ms,
+                                        "cached_market_count": last_good_discovered_markets.len(),
                                     }),
                                 );
                             }
