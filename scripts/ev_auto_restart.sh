@@ -38,7 +38,8 @@ cd "$ROOT"
   fi
 
   echo "[$(date -u +'%Y-%m-%dT%H:%M:%SZ')] restart begin"
-  ./ev restart live
+  # Prevent lock FD inheritance into tmux/child process tree.
+  ./ev restart live 9>&-
 
   sleep 5
 
