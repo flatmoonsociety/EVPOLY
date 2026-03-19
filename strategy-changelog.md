@@ -75,6 +75,15 @@ Older entries may reference env keys that were removed in later commits.
 
 ## Change Log
 
+### 2026-03-19
+
+- `mm_sport_v1` prestart inventory-exit reliability hardening (`src/main.rs`):
+  - added tolerant `game_start_time` parsing fallback formats so MM Sport can resolve start timestamps even when feeds return non-strict RFC3339 datetime strings.
+  - added inventory-condition fallback refresh (`60s`) so open MM Sport positions can still enter prestart exit handling even if a condition temporarily falls out of normal reward discovery scope.
+  - prestart SELL exits now bypass reward `min_size` floor and enforce exchange min-order floor only, preventing stuck sub-reward inventory during the `T-60m` to start exit window.
+  - added forced `T-5m` exit mode: if inventory remains, MM Sport places one non-post-only SELL limit targeting level-2 bid (fallback level-1 when needed) to prioritize immediate flattening.
+  - affects `mm_sport_v1` sports pregame inventory-exit path across all discovered symbols/markets; normal two-outcome BUY quoting logic is unchanged.
+
 ### 2026-03-18
 
 - `mm_sport_v1` normal quoting now uses pair-depth regimes to avoid one-sided high-mult quotes when one outcome book is thinner (`src/main.rs`):

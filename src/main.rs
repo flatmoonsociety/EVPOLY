@@ -864,14 +864,51 @@ fn near_base_distance_bps(base: f64, current: f64) -> Option<f64> {
 }
 
 fn parse_rfc3339_to_ts_ms(value: &str) -> Option<i64> {
-    chrono::DateTime::parse_from_rfc3339(value.trim())
-        .ok()
-        .map(|dt| dt.timestamp_millis())
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(trimmed) {
+        return Some(dt.timestamp_millis());
+    }
+
+    // Gamma/CLOB timestamps sometimes use a space separator instead of `T`.
+    for fmt in [
+        "%Y-%m-%d %H:%M:%S%:z",
+        "%Y-%m-%d %H:%M:%S%.f%:z",
+        "%Y-%m-%d %H:%M:%S%z",
+        "%Y-%m-%d %H:%M:%S%.f%z",
+    ] {
+        if let Ok(dt) = chrono::DateTime::parse_from_str(trimmed, fmt) {
+            return Some(dt.timestamp_millis());
+        }
+    }
+
+    // Fallback for UTC timestamps without explicit timezone.
+    for fmt in ["%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"] {
+        if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(trimmed, fmt) {
+            return Some(naive.and_utc().timestamp_millis());
+        }
+    }
+
+    if let Ok(date_only) = chrono::NaiveDate::parse_from_str(trimmed, "%Y-%m-%d") {
+        return date_only
+            .and_hms_opt(0, 0, 0)
+            .map(|dt| dt.and_utc().timestamp_millis());
+    }
+
+    None
 }
 
 fn mm_sport_prestart_exit_mode(now_ms: i64, game_start_ts_ms: i64) -> bool {
     game_start_ts_ms > 0
         && now_ms >= game_start_ts_ms.saturating_sub(60 * 60 * 1_000)
+        && now_ms < game_start_ts_ms
+}
+
+fn mm_sport_force_exit_mode(now_ms: i64, game_start_ts_ms: i64) -> bool {
+    game_start_ts_ms > 0
+        && now_ms >= game_start_ts_ms.saturating_sub(MM_SPORT_FORCE_EXIT_WINDOW_MS)
         && now_ms < game_start_ts_ms
 }
 
@@ -979,6 +1016,8 @@ fn mm_sport_size_shares_from_pending(row: &PendingOrderRecord) -> Option<f64> {
 
 const MM_SPORT_LOW_DEPTH_FLOOR_USD: f64 = 30_000.0;
 const MM_SPORT_LOW_DEPTH_QUOTE_SIZE_MULT: f64 = 1.2;
+const MM_SPORT_FORCE_EXIT_WINDOW_MS: i64 = 5 * 60 * 1_000;
+const MM_SPORT_EXIT_FALLBACK_REFRESH_MS: i64 = 60_000;
 
 fn mm_sport_external_top_bid_depth(
     buy_rows: &[PendingOrderRecord],
@@ -12683,6 +12722,11 @@ async fn main() -> Result<()> {
                 let mut last_action_ms_by_token_side: std::collections::HashMap<String, i64> =
                     std::collections::HashMap::new();
                 let mut last_heartbeat_ms = 0_i64;
+                let mut fallback_exit_markets_by_condition: std::collections::HashMap<
+                    String,
+                    MmSportMarket,
+                > = std::collections::HashMap::new();
+                let mut last_exit_fallback_refresh_ms = 0_i64;
 
                 loop {
                     let loop_now_ms = chrono::Utc::now().timestamp_millis();
@@ -12886,15 +12930,29 @@ async fn main() -> Result<()> {
 
                     let mut inventory_by_token: std::collections::HashMap<String, f64> =
                         std::collections::HashMap::new();
+                    let mut inventory_condition_ids: std::collections::HashSet<String> =
+                        std::collections::HashSet::new();
                     if let Ok(rows) = tracking_db_for_mm_sport
                         .list_open_position_inventory_by_strategy(STRATEGY_ID_MM_SPORT_V1, 20_000)
                     {
                         for row in rows {
-                            if row.token_id.trim().is_empty() || !row.net_units.is_finite() {
+                            let condition_id = row.condition_id.trim();
+                            let token_id = row.token_id.trim();
+                            if condition_id.is_empty()
+                                || token_id.is_empty()
+                                || !row.net_units.is_finite()
+                            {
                                 continue;
                             }
-                            let entry = inventory_by_token.entry(row.token_id).or_insert(0.0);
-                            *entry += row.net_units.max(0.0);
+                            let net_units = row.net_units.max(0.0);
+                            if net_units <= 0.0 {
+                                continue;
+                            }
+                            inventory_condition_ids.insert(condition_id.to_string());
+                            let entry = inventory_by_token
+                                .entry(token_id.to_string())
+                                .or_insert(0.0);
+                            *entry += net_units;
                         }
                     }
 
@@ -13006,7 +13064,118 @@ async fn main() -> Result<()> {
                         }
                     }
 
-                    for market in &discovered_markets {
+                    if now_ms.saturating_sub(last_exit_fallback_refresh_ms)
+                        >= MM_SPORT_EXIT_FALLBACK_REFRESH_MS
+                    {
+                        last_exit_fallback_refresh_ms = now_ms;
+                        fallback_exit_markets_by_condition.retain(|condition_id, _| {
+                            inventory_condition_ids.contains(condition_id)
+                        });
+                        let discovered_condition_ids = discovered_markets
+                            .iter()
+                            .map(|market| market.condition_id.to_ascii_lowercase())
+                            .collect::<std::collections::HashSet<_>>();
+                        let mut refreshed_count = 0usize;
+                        let mut included_count = 0usize;
+                        for condition_id in &inventory_condition_ids {
+                            if discovered_condition_ids.contains(&condition_id.to_ascii_lowercase())
+                            {
+                                fallback_exit_markets_by_condition.remove(condition_id);
+                                continue;
+                            }
+                            refreshed_count = refreshed_count.saturating_add(1);
+                            let details = match api_for_mm_sport
+                                .get_market_via_proxy_pool(condition_id.as_str())
+                                .await
+                            {
+                                Ok(value) => value,
+                                Err(_) => continue,
+                            };
+                            if !details.active || details.closed || !details.accepting_orders {
+                                continue;
+                            }
+                            if !mm_sport_is_sports_market(
+                                details.tags.as_slice(),
+                                details.market_slug.as_str(),
+                                details.market_slug.as_str(),
+                            ) {
+                                continue;
+                            }
+                            let question = details.question.trim();
+                            if mm_sport_cfg_for_loop.match_only
+                                && !mm_sport_is_match_market(details.market_slug.as_str(), question)
+                            {
+                                continue;
+                            }
+                            let game_start_ts_ms = details
+                                .game_start_time
+                                .as_deref()
+                                .and_then(parse_rfc3339_to_ts_ms)
+                                .or_else(|| parse_rfc3339_to_ts_ms(details.end_date_iso.as_str()))
+                                .unwrap_or(0);
+                            if !mm_sport_prestart_exit_mode(now_ms, game_start_ts_ms) {
+                                continue;
+                            }
+                            let (up_token_id, down_token_id) =
+                                match mm_sport_extract_binary_token_ids(&details.tokens) {
+                                    Some(value) => value,
+                                    None => continue,
+                                };
+                            let reward_min_size_shares = f64::try_from(details.rewards.min_size)
+                                .ok()
+                                .filter(|v| v.is_finite() && *v > 0.0)
+                                .unwrap_or(0.0);
+                            let minimum_tick_size = f64::try_from(details.minimum_tick_size)
+                                .ok()
+                                .filter(|v| v.is_finite() && *v > 0.0)
+                                .unwrap_or(0.01);
+                            let minimum_order_size_usd = f64::try_from(details.minimum_order_size)
+                                .ok()
+                                .filter(|v| v.is_finite() && *v > 0.0)
+                                .unwrap_or(1.0);
+                            let period_timestamp = u64::try_from((game_start_ts_ms / 1_000).max(0))
+                                .ok()
+                                .unwrap_or(0);
+                            fallback_exit_markets_by_condition.insert(
+                                condition_id.to_string(),
+                                MmSportMarket {
+                                    condition_id: condition_id.to_string(),
+                                    market_slug: details.market_slug.clone(),
+                                    reward_rate_per_day: 0.0,
+                                    reward_min_size_shares,
+                                    minimum_tick_size,
+                                    minimum_order_size_usd,
+                                    game_start_ts_ms,
+                                    period_timestamp,
+                                    up_token_id,
+                                    down_token_id,
+                                },
+                            );
+                            included_count = included_count.saturating_add(1);
+                        }
+                        log_event(
+                            "mm_sport_exit_fallback_market_refresh",
+                            json!({
+                                "strategy_id": STRATEGY_ID_MM_SPORT_V1,
+                                "inventory_condition_count": inventory_condition_ids.len(),
+                                "refreshed_count": refreshed_count,
+                                "included_count": included_count
+                            }),
+                        );
+                    }
+
+                    let mut active_markets = discovered_markets.clone();
+                    let mut active_condition_ids = active_markets
+                        .iter()
+                        .map(|market| market.condition_id.to_ascii_lowercase())
+                        .collect::<std::collections::HashSet<_>>();
+                    for market in fallback_exit_markets_by_condition.values() {
+                        if active_condition_ids.insert(market.condition_id.to_ascii_lowercase()) {
+                            active_markets.push(market.clone());
+                        }
+                    }
+
+                    for market in &active_markets {
                         let prestart_exit_mode =
                             mm_sport_prestart_exit_mode(now_ms, market.game_start_ts_ms);
                         if mm_sport_cfg_for_loop.pregame_only && market.game_start_ts_ms <= now_ms {
@@ -13300,18 +13469,45 @@ async fn main() -> Result<()> {
                                     continue;
                                 }
 
-                                // Mirror MM rewards forced-exit floor behavior: do not submit
-                                // exits below exchange/reward minimum share requirements.
+                                let force_exit_mode =
+                                    mm_sport_force_exit_mode(now_ms_local, market.game_start_ts_ms);
+                                let second_best_bid = if force_exit_mode {
+                                    nth_best_bid_from_orderbook(book, 2)
+                                } else {
+                                    None
+                                };
+                                let force_exit_price = if force_exit_mode {
+                                    second_best_bid.or(Some(best_bid))
+                                } else {
+                                    None
+                                };
+                                let submit_exit_price =
+                                    force_exit_price.unwrap_or(best_ask).max(0.000_001);
+                                let sell_post_only = if force_exit_mode {
+                                    false
+                                } else {
+                                    mm_sport_cfg_for_loop.post_only
+                                };
+                                if force_exit_mode {
+                                    log_event(
+                                        "mm_sport_inventory_exit_force_mode",
+                                        json!({
+                                            "strategy_id": STRATEGY_ID_MM_SPORT_V1,
+                                            "condition_id": market.condition_id,
+                                            "token_id": token_id,
+                                            "seconds_to_start": (market.game_start_ts_ms.saturating_sub(now_ms_local) / 1_000).max(0),
+                                            "target_price": submit_exit_price,
+                                            "target_level": if second_best_bid.is_some() { 2 } else { 1 }
+                                        }),
+                                    );
+                                }
+
+                                // Inventory exit must clear exposure before start:
+                                // enforce exchange floor only (reward min-size is bypassed).
                                 let exchange_min_shares = (market.minimum_order_size_usd.max(1.0)
-                                    / best_ask.max(0.000_001))
-                                .max(1.0);
-                                let reward_min_shares =
-                                    if mm_sport_cfg_for_loop.require_reward_eligible {
-                                        market.reward_min_size_shares.max(0.0)
-                                    } else {
-                                        0.0
-                                    };
-                                let min_exit_shares = exchange_min_shares.max(reward_min_shares);
+                                    / submit_exit_price)
+                                    .max(1.0);
+                                let min_exit_shares = exchange_min_shares;
                                 if desired_exit_shares + 1e-9 < min_exit_shares {
                                     if !sell_rows.is_empty() && can_sell_action {
                                         let _ = mm_sport_cancel_pending_rows(
@@ -13332,21 +13528,22 @@ async fn main() -> Result<()> {
                                             "inventory_shares": desired_exit_shares,
                                             "min_exit_shares": min_exit_shares,
                                             "exchange_min_shares": exchange_min_shares,
-                                            "reward_min_shares": reward_min_shares,
-                                            "best_ask": best_ask
+                                            "reward_min_shares": 0.0,
+                                            "submit_exit_price": submit_exit_price,
+                                            "force_exit_mode": force_exit_mode
                                         }),
                                     );
                                     continue;
                                 }
 
-                                let desired_exit_usd = desired_exit_shares * best_ask;
+                                let desired_exit_usd = desired_exit_shares * submit_exit_price;
                                 let mut keep_sell_id: Option<String> = None;
                                 let mut sell_cancel_rows = Vec::new();
                                 for row in &sell_rows {
                                     if keep_sell_id.is_none()
                                         && mm_sport_order_matches_target(
                                             row,
-                                            best_ask,
+                                            submit_exit_price,
                                             desired_exit_usd,
                                             market.minimum_tick_size,
                                             mm_sport_cfg_for_loop.size_requote_delta_pct,
@@ -13397,9 +13594,9 @@ async fn main() -> Result<()> {
                                         market,
                                         token_id,
                                         "SELL",
-                                        best_ask,
+                                        submit_exit_price,
                                         desired_exit_shares,
-                                        mm_sport_cfg_for_loop.post_only,
+                                        sell_post_only,
                                         now_ms_local,
                                     )
                                     .await
@@ -13416,8 +13613,9 @@ async fn main() -> Result<()> {
                                                     "strategy_id": STRATEGY_ID_MM_SPORT_V1,
                                                     "condition_id": market.condition_id,
                                                     "token_id": token_id,
-                                                    "price": best_ask,
+                                                    "price": submit_exit_price,
                                                     "size_shares": desired_exit_shares,
+                                                    "force_exit_mode": force_exit_mode,
                                                     "error": e.to_string()
                                                 }),
                                             );
@@ -29755,6 +29953,23 @@ fn nth_best_ask_from_orderbook(
     asks.get(ask_level_1based.saturating_sub(1)).copied()
 }
 
+fn nth_best_bid_from_orderbook(
+    orderbook: &polymarket_arbitrage_bot::models::OrderBook,
+    bid_level_1based: usize,
+) -> Option<f64> {
+    if bid_level_1based == 0 {
+        return None;
+    }
+    let mut bids = orderbook
+        .bids
+        .iter()
+        .filter_map(|level| f64::try_from(level.price).ok())
+        .filter(|v| v.is_finite() && *v > 0.0)
+        .collect::<Vec<_>>();
+    bids.sort_by(|a, b| b.total_cmp(a));
+    bids.get(bid_level_1based.saturating_sub(1)).copied()
+}
+
 fn best_bid_ask_sizes_from_orderbook(
     orderbook: &polymarket_arbitrage_bot::models::OrderBook,
 ) -> (Option<f64>, Option<f64>, Option<f64>, Option<f64>) {
@@ -30705,6 +30920,27 @@ mod tests {
     }
 
     #[test]
+    fn mm_sport_force_exit_window_is_exact_5_minutes_before_start() {
+        let game_start_ts_ms = 2_000_000_000_000_i64;
+        assert!(!mm_sport_force_exit_mode(
+            game_start_ts_ms - MM_SPORT_FORCE_EXIT_WINDOW_MS - 1,
+            game_start_ts_ms
+        ));
+        assert!(mm_sport_force_exit_mode(
+            game_start_ts_ms - MM_SPORT_FORCE_EXIT_WINDOW_MS,
+            game_start_ts_ms
+        ));
+        assert!(mm_sport_force_exit_mode(
+            game_start_ts_ms - 1,
+            game_start_ts_ms
+        ));
+        assert!(!mm_sport_force_exit_mode(
+            game_start_ts_ms,
+            game_start_ts_ms
+        ));
+    }
+
+    #[test]
     fn mm_sport_buy_size_boosts_opposite_outcome_after_fill_pause() {
         assert!((mm_sport_desired_buy_shares(1200.0, 0.0) - 1200.0).abs() < 1e-9);
         assert!((mm_sport_desired_buy_shares(1200.0, 1000.0) - 2200.0).abs() < 1e-9);
@@ -30790,6 +31026,31 @@ mod tests {
         assert_eq!(best_ask, Some(0.51));
         assert_eq!(best_bid_size, Some(140.0));
         assert_eq!(best_ask_size, Some(50.0));
+    }
+
+    #[test]
+    fn nth_best_bid_from_orderbook_reads_sorted_levels() {
+        let orderbook = polymarket_arbitrage_bot::models::OrderBook {
+            bids: vec![
+                polymarket_arbitrage_bot::models::OrderBookEntry {
+                    price: rust_decimal::Decimal::new(50, 2),
+                    size: rust_decimal::Decimal::new(100, 0),
+                },
+                polymarket_arbitrage_bot::models::OrderBookEntry {
+                    price: rust_decimal::Decimal::new(49, 2),
+                    size: rust_decimal::Decimal::new(80, 0),
+                },
+                polymarket_arbitrage_bot::models::OrderBookEntry {
+                    price: rust_decimal::Decimal::new(48, 2),
+                    size: rust_decimal::Decimal::new(60, 0),
+                },
+            ],
+            asks: vec![],
+        };
+        assert_eq!(nth_best_bid_from_orderbook(&orderbook, 1), Some(0.50));
+        assert_eq!(nth_best_bid_from_orderbook(&orderbook, 2), Some(0.49));
+        assert_eq!(nth_best_bid_from_orderbook(&orderbook, 3), Some(0.48));
+        assert_eq!(nth_best_bid_from_orderbook(&orderbook, 4), None);
     }
 
     #[test]
