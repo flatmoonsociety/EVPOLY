@@ -13870,6 +13870,29 @@ async fn main() -> Result<()> {
                                     }
                                     Ok(None) => {}
                                     Err(e) => {
+                                        let err_text = e.to_string();
+                                        let lower = err_text.to_ascii_lowercase();
+                                        let insufficient_balance = lower
+                                            .contains("not enough balance")
+                                            || lower.contains("allowance")
+                                            || lower.contains("insufficient");
+                                        if insufficient_balance {
+                                            let backoff_ms = 30_000_i64;
+                                            let defer_until =
+                                                now_ms_local.saturating_add(backoff_ms);
+                                            last_action_ms_by_token_side
+                                                .insert(buy_key.clone(), defer_until);
+                                            log_event(
+                                                "mm_sport_buy_backoff_balance_allowance",
+                                                json!({
+                                                    "strategy_id": STRATEGY_ID_MM_SPORT_V1,
+                                                    "condition_id": market.condition_id,
+                                                    "token_id": token_id,
+                                                    "defer_until_ms": defer_until,
+                                                    "backoff_ms": backoff_ms
+                                                }),
+                                            );
+                                        }
                                         log_event(
                                             "mm_sport_place_buy_failed",
                                             json!({
@@ -13878,7 +13901,7 @@ async fn main() -> Result<()> {
                                                 "token_id": token_id,
                                                 "price": best_bid,
                                                 "size_shares": desired_bid_shares,
-                                                "error": e.to_string()
+                                                "error": err_text
                                             }),
                                         );
                                     }

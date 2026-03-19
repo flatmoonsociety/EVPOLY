@@ -81,6 +81,7 @@ Older entries may reference env keys that were removed in later commits.
   - hardcoded low-depth floor raised from `30,000` to `50,000` USD (`MM_SPORT_LOW_DEPTH_FLOOR_USD`).
   - new baseline gate requires both outcomes to support at least `1.2x` reward-min shares under `max_share_ratio` (default 2%): required external top shares per side = `baseline * (1-r)/r`.
   - if either side fails that baseline ratio gate, bot cancels both sides for the market and waits; quoting resumes only after both sides become feasible again.
+  - BUY placement failures from balance/allowance errors now trigger a per-token BUY cooldown backoff (`30s`) before reattempt (`mm_sport_buy_backoff_balance_allowance`), reducing rapid retry spam while preserving normal quoting when capacity recovers.
 
 - `mm_rewards_v1` + `mm_sport_v1` pending-order reconciliation now treats exchange unknown terminal states (notably `INVALID`) as terminal instead of `OPEN` (`src/main.rs`, `src/trader.rs`):
   - shared terminal helpers now classify unknown status strings into `FILLED` / `CANCELED` / `STALE`; `INVALID` maps to `STALE`.
