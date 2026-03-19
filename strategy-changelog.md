@@ -77,6 +77,12 @@ Older entries may reference env keys that were removed in later commits.
 
 ### 2026-03-19
 
+- `mm_sport_v1` budget gating and collateral allowance parsing were hardened to prevent false zero-budget starvation (`src/main.rs`, `src/api.rs`):
+  - MM Sport now reserves budget against its own active BUY notional only (instead of all strategies), so `mm_rewards_v1` open BUYs do not zero out MM Sport quote capacity.
+  - USDC allowance lookup now falls back to the max allowance reported by CLOB when the configured exchange key resolves to zero/missing.
+  - MM Sport budget now falls back to balance-based sizing when collateral allowance resolves to zero, preventing hard-stop when balance is available but allowance telemetry is stale/incomplete.
+  - impact: MM Sport can keep quoting eligible markets when wallet collateral is available, while still enforcing strategy-local budget caps.
+
 - `mm_sport_v1` quoting/exposure control was rewritten to remove ratio-based size shrinking and enforce strict pair-level watch/cancel behavior (`src/main.rs`, `src/mm/mod.rs`, `.env.example`, `.env.full.example`):
   - removed per-side “shrink to fit ratio” path; normal quoting now uses strict ratio feasibility only.
   - if either side breaches `max_share_ratio`, MM Sport cancels both sides for that market and stays in watch mode until depth recovers.

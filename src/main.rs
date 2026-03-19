@@ -2767,11 +2767,32 @@ async fn main() -> Result<()> {
             warn!("Admin API server stopped: {}", e);
         }
     });
-    if let Err(e) = trader_arc
-        .reconcile_tracked_pending_orders_on_startup()
-        .await
-    {
-        warn!("Startup pending-order reconcile failed: {}", e);
+    let startup_pending_reconcile_enable =
+        env_bool_named("EVPOLY_STARTUP_PENDING_RECONCILE_ENABLE", true);
+    if !is_simulation && startup_pending_reconcile_enable {
+        let trader_for_startup_reconcile = trader_arc.clone();
+        tokio::spawn(async move {
+            match tokio::time::timeout(
+                tokio::time::Duration::from_secs(180),
+                trader_for_startup_reconcile.reconcile_tracked_pending_orders_on_startup(),
+            )
+            .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    warn!("Startup pending-order reconcile failed: {}", e);
+                }
+                Err(_) => {
+                    warn!(
+                        "Startup pending-order reconcile timed out after 180s; continuing runtime startup."
+                    );
+                }
+            }
+        });
+    } else if !is_simulation {
+        eprintln!(
+            "⏭️ Startup pending-order reconcile skipped (EVPOLY_STARTUP_PENDING_RECONCILE_ENABLE=false)"
+        );
     }
     let trader_clone = trader_arc.clone();
     // Startup runtime sequence:
@@ -12951,20 +12972,20 @@ async fn main() -> Result<()> {
                         String,
                         Vec<PendingOrderRecord>,
                     > = std::collections::HashMap::new();
-                    let mut open_buy_notional_usd_all = 0.0_f64;
+                    let mut open_buy_notional_usd_mm_sport = 0.0_f64;
                     if let Ok(rows) = tracking_db_for_mm_sport.list_active_pending_orders() {
                         for row in rows {
-                            if row.side.eq_ignore_ascii_case("BUY")
-                                && row.size_usd.is_finite()
-                                && row.size_usd > 0.0
-                            {
-                                open_buy_notional_usd_all += row.size_usd;
-                            }
                             if !row
                                 .strategy_id
                                 .eq_ignore_ascii_case(STRATEGY_ID_MM_SPORT_V1)
                             {
                                 continue;
+                            }
+                            if row.side.eq_ignore_ascii_case("BUY")
+                                && row.size_usd.is_finite()
+                                && row.size_usd > 0.0
+                            {
+                                open_buy_notional_usd_mm_sport += row.size_usd;
                             }
                             let Some(condition_id) = row.condition_id.clone() else {
                                 continue;
@@ -12994,10 +13015,17 @@ async fn main() -> Result<()> {
                             .ok()
                             .unwrap_or(0.0)
                             .max(0.0);
-                            let usable_budget_usd =
-                                (usdc_balance_usd.min(usdc_allowance_usd) * 0.80).max(0.0);
+                            // Some wallet/account modes can report collateral allowance as zero
+                            // even while BUY posting is valid. Avoid hard-starving MM Sport by
+                            // falling back to balance-based budgeting in that case.
+                            let budget_basis_usd = if usdc_allowance_usd > 0.0 {
+                                usdc_balance_usd.min(usdc_allowance_usd)
+                            } else {
+                                usdc_balance_usd
+                            };
+                            let usable_budget_usd = (budget_basis_usd * 0.80).max(0.0);
                             let remaining_budget_usd =
-                                (usable_budget_usd - open_buy_notional_usd_all).max(0.0);
+                                (usable_budget_usd - open_buy_notional_usd_mm_sport).max(0.0);
                             mm_sport_buy_budget_total_usd = Some(usable_budget_usd);
                             mm_sport_buy_budget_remaining_usd = Some(remaining_budget_usd);
                         }

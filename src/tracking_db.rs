@@ -4351,60 +4351,70 @@ CREATE INDEX IF NOT EXISTS idx_snapback_snapshots_order_id
             ACTIVE_PENDING_ORDER_STATUSES_SQL
         );
         conn.execute(pending_orders_terminal_prune_idx_sql.as_str(), [])?;
-        conn.execute(
-            "UPDATE trade_events SET strategy_id=COALESCE(NULLIF(TRIM(strategy_id),''),'legacy_default')",
-            [],
-        )?;
-        conn.execute(
-            "UPDATE trade_events SET run_id=COALESCE(NULLIF(TRIM(run_id),''),'legacy_run'), strategy_cohort=LOWER(TRIM(COALESCE(NULLIF(strategy_cohort,''),'default')))",
-            [],
-        )?;
-        conn.execute(
-            "UPDATE trade_events SET asset_symbol=UPPER(TRIM(COALESCE(NULLIF(asset_symbol,''), CASE WHEN UPPER(COALESCE(token_type,'')) LIKE 'ETH %' THEN 'ETH' WHEN UPPER(COALESCE(token_type,'')) LIKE 'SOL %' THEN 'SOL' WHEN UPPER(COALESCE(token_type,'')) LIKE 'XRP %' THEN 'XRP' WHEN UPPER(COALESCE(token_type,'')) LIKE 'BTC %' THEN 'BTC' ELSE 'BTC' END)))",
-            [],
-        )?;
-        conn.execute(
-            "UPDATE strategy_decisions SET strategy_id=COALESCE(NULLIF(TRIM(strategy_id),''),'legacy_default')",
-            [],
-        )?;
-        conn.execute(
-            "UPDATE strategy_decisions SET run_id=COALESCE(NULLIF(TRIM(run_id),''),'legacy_run'), strategy_cohort=LOWER(TRIM(COALESCE(NULLIF(strategy_cohort,''),'default')))",
-            [],
-        )?;
-        conn.execute(
-            "UPDATE strategy_decisions SET market_key=LOWER(TRIM(COALESCE(NULLIF(market_key,''), NULLIF(asset_symbol,''), 'btc'))), asset_symbol=UPPER(TRIM(COALESCE(NULLIF(asset_symbol,''), NULLIF(market_key,''), 'BTC')))",
-            [],
-        )?;
-        conn.execute(
-            "UPDATE strategy_decision_contexts SET strategy_id=COALESCE(NULLIF(TRIM(strategy_id),''),'legacy_default')",
-            [],
-        )?;
-        conn.execute(
-            "UPDATE strategy_decision_contexts SET run_id=COALESCE(NULLIF(TRIM(run_id),''),'legacy_run'), strategy_cohort=LOWER(TRIM(COALESCE(NULLIF(strategy_cohort,''),'default')))",
-            [],
-        )?;
-        conn.execute(
-            "UPDATE strategy_decision_contexts SET market_key=LOWER(TRIM(COALESCE(NULLIF(market_key,''), NULLIF(asset_symbol,''), 'btc'))), asset_symbol=UPPER(TRIM(COALESCE(NULLIF(asset_symbol,''), NULLIF(market_key,''), 'BTC')))",
-            [],
-        )?;
-        conn.execute(
-            "UPDATE skipped_markets SET strategy_id=COALESCE(NULLIF(TRIM(strategy_id),''),'legacy_default')",
-            [],
-        )?;
-        conn.execute(
-            "UPDATE skipped_markets SET run_id=COALESCE(NULLIF(TRIM(run_id),''),'legacy_run'), strategy_cohort=LOWER(TRIM(COALESCE(NULLIF(strategy_cohort,''),'default')))",
-            [],
-        )?;
-        conn.execute(
-            "UPDATE skipped_markets SET market_key=LOWER(TRIM(COALESCE(NULLIF(market_key,''), NULLIF(asset_symbol,''), 'btc'))), asset_symbol=UPPER(TRIM(COALESCE(NULLIF(asset_symbol,''), NULLIF(market_key,''), 'BTC')))",
-            [],
-        )?;
-        conn.execute(
-            "UPDATE pending_orders SET side=UPPER(TRIM(side)), status=UPPER(TRIM(status)), entry_mode=UPPER(TRIM(COALESCE(entry_mode,'LEGACY'))), strategy_id=COALESCE(NULLIF(TRIM(strategy_id),''),'legacy_default'), run_id=COALESCE(NULLIF(TRIM(run_id),''),'legacy_run'), strategy_cohort=LOWER(TRIM(COALESCE(NULLIF(strategy_cohort,''),'default'))), asset_symbol=UPPER(TRIM(COALESCE(NULLIF(asset_symbol,''),'BTC'))), condition_id=NULLIF(TRIM(COALESCE(condition_id,'')),'')",
-            [],
-        )?;
-        conn.execute(
-            r#"
+        let run_legacy_boot_normalization = std::env::var("EVPOLY_DB_LEGACY_NORMALIZE_ON_BOOT")
+            .ok()
+            .map(|v| {
+                matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+            .unwrap_or(false);
+        if run_legacy_boot_normalization {
+            conn.execute(
+                "UPDATE trade_events SET strategy_id=COALESCE(NULLIF(TRIM(strategy_id),''),'legacy_default')",
+                [],
+            )?;
+            conn.execute(
+                "UPDATE trade_events SET run_id=COALESCE(NULLIF(TRIM(run_id),''),'legacy_run'), strategy_cohort=LOWER(TRIM(COALESCE(NULLIF(strategy_cohort,''),'default')))",
+                [],
+            )?;
+            conn.execute(
+                "UPDATE trade_events SET asset_symbol=UPPER(TRIM(COALESCE(NULLIF(asset_symbol,''), CASE WHEN UPPER(COALESCE(token_type,'')) LIKE 'ETH %' THEN 'ETH' WHEN UPPER(COALESCE(token_type,'')) LIKE 'SOL %' THEN 'SOL' WHEN UPPER(COALESCE(token_type,'')) LIKE 'XRP %' THEN 'XRP' WHEN UPPER(COALESCE(token_type,'')) LIKE 'BTC %' THEN 'BTC' ELSE 'BTC' END)))",
+                [],
+            )?;
+            conn.execute(
+                "UPDATE strategy_decisions SET strategy_id=COALESCE(NULLIF(TRIM(strategy_id),''),'legacy_default')",
+                [],
+            )?;
+            conn.execute(
+                "UPDATE strategy_decisions SET run_id=COALESCE(NULLIF(TRIM(run_id),''),'legacy_run'), strategy_cohort=LOWER(TRIM(COALESCE(NULLIF(strategy_cohort,''),'default')))",
+                [],
+            )?;
+            conn.execute(
+                "UPDATE strategy_decisions SET market_key=LOWER(TRIM(COALESCE(NULLIF(market_key,''), NULLIF(asset_symbol,''), 'btc'))), asset_symbol=UPPER(TRIM(COALESCE(NULLIF(asset_symbol,''), NULLIF(market_key,''), 'BTC')))",
+                [],
+            )?;
+            conn.execute(
+                "UPDATE strategy_decision_contexts SET strategy_id=COALESCE(NULLIF(TRIM(strategy_id),''),'legacy_default')",
+                [],
+            )?;
+            conn.execute(
+                "UPDATE strategy_decision_contexts SET run_id=COALESCE(NULLIF(TRIM(run_id),''),'legacy_run'), strategy_cohort=LOWER(TRIM(COALESCE(NULLIF(strategy_cohort,''),'default')))",
+                [],
+            )?;
+            conn.execute(
+                "UPDATE strategy_decision_contexts SET market_key=LOWER(TRIM(COALESCE(NULLIF(market_key,''), NULLIF(asset_symbol,''), 'btc'))), asset_symbol=UPPER(TRIM(COALESCE(NULLIF(asset_symbol,''), NULLIF(market_key,''), 'BTC')))",
+                [],
+            )?;
+            conn.execute(
+                "UPDATE skipped_markets SET strategy_id=COALESCE(NULLIF(TRIM(strategy_id),''),'legacy_default')",
+                [],
+            )?;
+            conn.execute(
+                "UPDATE skipped_markets SET run_id=COALESCE(NULLIF(TRIM(run_id),''),'legacy_run'), strategy_cohort=LOWER(TRIM(COALESCE(NULLIF(strategy_cohort,''),'default')))",
+                [],
+            )?;
+            conn.execute(
+                "UPDATE skipped_markets SET market_key=LOWER(TRIM(COALESCE(NULLIF(market_key,''), NULLIF(asset_symbol,''), 'btc'))), asset_symbol=UPPER(TRIM(COALESCE(NULLIF(asset_symbol,''), NULLIF(market_key,''), 'BTC')))",
+                [],
+            )?;
+            conn.execute(
+                "UPDATE pending_orders SET side=UPPER(TRIM(side)), status=UPPER(TRIM(status)), entry_mode=UPPER(TRIM(COALESCE(entry_mode,'LEGACY'))), strategy_id=COALESCE(NULLIF(TRIM(strategy_id),''),'legacy_default'), run_id=COALESCE(NULLIF(TRIM(run_id),''),'legacy_run'), strategy_cohort=LOWER(TRIM(COALESCE(NULLIF(strategy_cohort,''),'default'))), asset_symbol=UPPER(TRIM(COALESCE(NULLIF(asset_symbol,''),'BTC'))), condition_id=NULLIF(TRIM(COALESCE(condition_id,'')),'')",
+                [],
+            )?;
+            conn.execute(
+                r#"
 UPDATE pending_orders
 SET filled_at_ms = COALESCE(
         filled_at_ms,
@@ -4421,28 +4431,29 @@ SET filled_at_ms = COALESCE(
     )
 WHERE filled_at_ms IS NULL
 "#,
-            [],
-        )?;
-        conn.execute(
-            "UPDATE outcome_reflections SET strategy_id=COALESCE(NULLIF(TRIM(strategy_id),''),'legacy_default')",
-            [],
-        )?;
-        conn.execute(
-            "UPDATE parameter_suggestions SET strategy_id=COALESCE(NULLIF(TRIM(strategy_id),''),'legacy_default')",
-            [],
-        )?;
-        conn.execute(
-            "UPDATE parameter_suggestion_history SET strategy_id=COALESCE(NULLIF(TRIM(strategy_id),''),'legacy_default')",
-            [],
-        )?;
-        conn.execute(
-            "UPDATE runtime_parameter_state SET strategy_id=COALESCE(NULLIF(TRIM(strategy_id),''),'legacy_default')",
-            [],
-        )?;
-        conn.execute(
-            "UPDATE runtime_parameter_events SET strategy_id=COALESCE(NULLIF(TRIM(strategy_id),''),'legacy_default')",
-            [],
-        )?;
+                [],
+            )?;
+            conn.execute(
+                "UPDATE outcome_reflections SET strategy_id=COALESCE(NULLIF(TRIM(strategy_id),''),'legacy_default')",
+                [],
+            )?;
+            conn.execute(
+                "UPDATE parameter_suggestions SET strategy_id=COALESCE(NULLIF(TRIM(strategy_id),''),'legacy_default')",
+                [],
+            )?;
+            conn.execute(
+                "UPDATE parameter_suggestion_history SET strategy_id=COALESCE(NULLIF(TRIM(strategy_id),''),'legacy_default')",
+                [],
+            )?;
+            conn.execute(
+                "UPDATE runtime_parameter_state SET strategy_id=COALESCE(NULLIF(TRIM(strategy_id),''),'legacy_default')",
+                [],
+            )?;
+            conn.execute(
+                "UPDATE runtime_parameter_events SET strategy_id=COALESCE(NULLIF(TRIM(strategy_id),''),'legacy_default')",
+                [],
+            )?;
+        }
         conn.execute_batch(
             r#"
 DROP INDEX IF EXISTS uidx_strategy_decisions_period_tf_strategy;

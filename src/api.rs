@@ -5203,12 +5203,34 @@ impl PolymarketApi {
             .ok_or_else(|| anyhow::anyhow!("Failed to get contract config"))?;
         let exchange_address = config.exchange;
 
-        // Allowances is a HashMap<Address, String> - get the allowance for the Exchange contract
-        let allowance = balance_allowance
+        // Allowances is a HashMap<Address, String> - prefer the configured exchange key.
+        // Some signer/account modes can return the allowance under a different key, so
+        // fall back to the max reported allowance when the configured exchange lookup is zero.
+        let mut allowance = balance_allowance
             .allowances
             .get(&exchange_address)
             .and_then(|s| rust_decimal::Decimal::from_str(s).ok())
             .unwrap_or(rust_decimal::Decimal::ZERO);
+        if allowance <= rust_decimal::Decimal::ZERO {
+            let max_reported_allowance = balance_allowance
+                .allowances
+                .values()
+                .filter_map(|raw| rust_decimal::Decimal::from_str(raw).ok())
+                .fold(rust_decimal::Decimal::ZERO, |acc, value| {
+                    if value > acc {
+                        value
+                    } else {
+                        acc
+                    }
+                });
+            if max_reported_allowance > allowance {
+                warn!(
+                    "USDC allowance for configured exchange {} missing/zero; using max reported allowance fallback",
+                    exchange_address
+                );
+                allowance = max_reported_allowance;
+            }
+        }
 
         *self.cached_usdc_balance_allowance.lock().await = Some((
             balance.clone(),
