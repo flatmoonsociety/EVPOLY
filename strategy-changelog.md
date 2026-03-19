@@ -70,12 +70,24 @@ Older entries may reference env keys that were removed in later commits.
 - Discovers pregame sports match markets from rewards API + CLOB market details.
 - Quotes top-of-book BUY on both outcomes (maker-only, post-only), no ladder.
 - Uses reward min-size floor with multiplier and a top-share ratio gate before quote placement.
-- Uses literal SELL only for inventory exit in the prestart window.
-- Pauses a market for 15 minutes after any fill and cancels active market orders during pause.
+- Uses literal SELL only for inventory exit (prestart window or post-fill inventory unwind mode).
+- Pauses a market for 120 minutes after fills, then runs inventory unwind before resuming two-sided BUY quoting.
 
 ## Change Log
 
 ### 2026-03-19
+
+- `mm_sport_v1` quoting/exposure control was rewritten to remove ratio-based size shrinking and enforce strict pair-level watch/cancel behavior (`src/main.rs`, `src/mm/mod.rs`, `.env.example`, `.env.full.example`):
+  - removed per-side “shrink to fit ratio” path; normal quoting now uses strict ratio feasibility only.
+  - if either side breaches `max_share_ratio`, MM Sport cancels both sides for that market and stays in watch mode until depth recovers.
+  - buy sizing now applies a collateral budget precheck using `0.8 * min(USDC balance, USDC allowance)` with open-buy notional reservation; pair quotes are scaled or skipped when budget is insufficient.
+  - on buy capacity errors (`not enough balance / allowance`), MM Sport cancels the market pair to prevent persistent one-sided quoting and enters cooldown.
+  - `EVPOLY_MM_SPORT_MAX_SHARE_RATIO` default remains `0.02` (runtime override supported).
+
+- `mm_sport_v1` fill handling now uses a longer pause and post-pause inventory unwind flow (`src/main.rs`, `src/mm/mod.rs`, `.env.example`, `.env.full.example`):
+  - pause after fill default changed from `900s` to `7200s` (`EVPOLY_MM_SPORT_PAUSE_AFTER_FILL_SEC`).
+  - after pause, if inventory remains, market enters inventory-exit mode (BUY quoting off, SELL unwind on) until flat.
+  - once flat, strategy resumes normal two-sided BUY quoting.
 
 - `mm_sport_v1` normal quoting now enforces a hard pair-level baseline feasibility gate before any side quote (`src/main.rs`):
   - hardcoded low-depth floor raised from `30,000` to `50,000` USD (`MM_SPORT_LOW_DEPTH_FLOOR_USD`).
