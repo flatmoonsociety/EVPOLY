@@ -851,14 +851,7 @@ fn manual_price_from_quote(
                 best_ask.or(best_bid)
             }
         }
-        (ManualOrderAction::Close, ManualOrderMode::ChaseLimit) => {
-            if post_only {
-                best_ask
-                    .or(best_bid.map(|bid| (bid + tick_size.max(0.000_001)).min(MANUAL_MAX_PRICE)))
-            } else {
-                best_bid.or(best_ask)
-            }
-        }
+        (ManualOrderAction::Close, ManualOrderMode::ChaseLimit) => best_ask.or(best_bid),
         (ManualOrderAction::Open, ManualOrderMode::Limit) => {
             if post_only {
                 best_bid.or(best_ask)
@@ -866,13 +859,7 @@ fn manual_price_from_quote(
                 best_ask.or(best_bid)
             }
         }
-        (ManualOrderAction::Close, ManualOrderMode::Limit) => {
-            if post_only {
-                best_ask.or(best_bid)
-            } else {
-                best_bid.or(best_ask)
-            }
-        }
+        (ManualOrderAction::Close, ManualOrderMode::Limit) => best_ask.or(best_bid),
         (ManualOrderAction::Open, ManualOrderMode::Market) => best_ask
             .or(best_bid)
             .map(|p| (p + slip).min(MANUAL_MAX_PRICE)),
@@ -1575,7 +1562,7 @@ async fn start_manual_order(
         .ok()
         .flatten();
     let slippage_cents = request.slippage_cents.unwrap_or(20.0).clamp(0.0, 50.0);
-    let price_hint = manual_price_from_quote(
+    let price_hint = match manual_price_from_quote(
         quote_now.as_ref(),
         action,
         mode,
@@ -1585,8 +1572,17 @@ async fn start_manual_order(
         max_price,
         slippage_cents,
         tick_size,
-    )
-    .unwrap_or_else(|| request.price.unwrap_or(max_price));
+    ) {
+        Some(px) => px,
+        None if matches!(action, ManualOrderAction::Open) => request
+            .price
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .unwrap_or(max_price)
+            .clamp(min_price, max_price),
+        None => anyhow::bail!(
+            "unable to derive /manual/close price from best ask; provide explicit price or wait for quote/orderbook"
+        ),
+    };
 
     let (initial_balance_shares, balance_tracking_warning) =
         match token_shares_with_fallback(state.api.as_ref(), token_id.as_str()).await {
@@ -2171,6 +2167,10 @@ async fn start_manual_order(
                             snap.last_error = Some(format!("quote_failed: {e}"));
                         })
                         .await;
+                    if one_shot {
+                        stop_reason = "one_shot_submit_failed".to_string();
+                        break;
+                    }
                     tokio::time::sleep(Duration::from_millis(poll_ms)).await;
                     continue;
                 }
@@ -2186,6 +2186,19 @@ async fn start_manual_order(
                 slippage_cents,
                 tick_size,
             ) else {
+                if one_shot {
+                    manual_run
+                        .update(|snap| {
+                            snap.submit_errors = snap.submit_errors.saturating_add(1);
+                            snap.last_error = Some(
+                                "quote_failed: unable to derive submit price from best quote"
+                                    .to_string(),
+                            );
+                        })
+                        .await;
+                    stop_reason = "one_shot_submit_failed".to_string();
+                    break;
+                }
                 tokio::time::sleep(Duration::from_millis(poll_ms)).await;
                 continue;
             };
