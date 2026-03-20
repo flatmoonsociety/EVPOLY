@@ -79,6 +79,7 @@ Older entries may reference env keys that were removed in later commits.
 
 - Tick-metadata rate-limit handling was hardened across order submit + prewarm loops (`src/api.rs`, `src/main.rs`):
   - API prewarm now checks cache before backoff gate and marks tick-metadata backoff on prewarm-side rate limits (`tick_size` / `fee_rate` / `neg_risk`) instead of repeatedly falling through.
+  - tick-metadata backoff now also has a short global guard (in addition to per-token) so cross-token 429 bursts pause metadata fetches platform-wide briefly instead of immediately thrashing new token ids.
   - main order submit now fails fast when prewarm is explicitly blocked by tick-metadata backoff/rate-limit, avoiding immediate on-demand metadata retries.
   - runtime loops now parse `remaining_ms=` from metadata errors and defer retries accordingly:
     - `mm_sport_v1` BUY quote submit and inventory-exit SELL submit paths apply per-token-side backoff (`mm_sport_buy_backoff_tick_metadata`, `mm_sport_inventory_exit_backoff_tick_metadata`);

@@ -342,6 +342,8 @@ pub struct PolymarketApi {
     prewarming_order_metadata: Arc<tokio::sync::Mutex<HashSet<String>>>,
     tick_metadata_retry_after_ms_by_token: Arc<tokio::sync::Mutex<HashMap<String, i64>>>,
     tick_metadata_rl_failures_by_token: Arc<tokio::sync::Mutex<HashMap<String, u32>>>,
+    tick_metadata_retry_after_ms_global: Arc<tokio::sync::Mutex<i64>>,
+    tick_metadata_rl_failures_global: Arc<tokio::sync::Mutex<u32>>,
     order_signer_circuit_state: Arc<tokio::sync::Mutex<OrderSignerCircuitState>>,
     ws_state: Arc<tokio::sync::Mutex<Option<SharedPolymarketWsState>>>,
     ws_enabled: bool,
@@ -412,6 +414,8 @@ impl PolymarketApi {
                 tokio::sync::Mutex::new(HashMap::new()),
             ),
             tick_metadata_rl_failures_by_token: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            tick_metadata_retry_after_ms_global: Arc::new(tokio::sync::Mutex::new(0)),
+            tick_metadata_rl_failures_global: Arc::new(tokio::sync::Mutex::new(0)),
             order_signer_circuit_state: Arc::new(tokio::sync::Mutex::new(
                 OrderSignerCircuitState::default(),
             )),
@@ -3515,15 +3519,31 @@ impl PolymarketApi {
     }
 
     async fn tick_metadata_retry_after_ms(&self, token_id: &str) -> Option<i64> {
-        self.tick_metadata_retry_after_ms_by_token
+        let token_retry_after_ms = self
+            .tick_metadata_retry_after_ms_by_token
             .lock()
             .await
             .get(token_id)
             .copied()
+            .unwrap_or(0);
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let global_retry_after_ms = {
+            let mut global_failures = self.tick_metadata_rl_failures_global.lock().await;
+            let mut global_retry_after = self.tick_metadata_retry_after_ms_global.lock().await;
+            if *global_retry_after <= now_ms {
+                *global_retry_after = 0;
+                *global_failures = 0;
+                0
+            } else {
+                *global_retry_after
+            }
+        };
+        let retry_after_ms = token_retry_after_ms.max(global_retry_after_ms);
+        (retry_after_ms > now_ms).then_some(retry_after_ms)
     }
 
     async fn set_tick_metadata_backoff(&self, token_id: &str) -> i64 {
-        let failures = {
+        let token_failures = {
             let mut guard = self.tick_metadata_rl_failures_by_token.lock().await;
             let next = guard
                 .get(token_id)
@@ -3534,25 +3554,48 @@ impl PolymarketApi {
             guard.insert(token_id.to_string(), next);
             next
         };
-        let shift = failures.saturating_sub(1).min(8);
-        let backoff_ms = TICK_METADATA_RL_BACKOFF_BASE_MS
-            .saturating_mul(1_i64 << shift)
+        let token_shift = token_failures.saturating_sub(1).min(8);
+        let token_backoff_ms = TICK_METADATA_RL_BACKOFF_BASE_MS
+            .saturating_mul(1_i64 << token_shift)
             .clamp(
                 TICK_METADATA_RL_BACKOFF_BASE_MS,
                 TICK_METADATA_RL_BACKOFF_MAX_MS,
             );
-        let retry_after_ms = chrono::Utc::now()
-            .timestamp_millis()
-            .saturating_add(backoff_ms);
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let token_retry_after_ms = now_ms.saturating_add(token_backoff_ms);
         self.tick_metadata_retry_after_ms_by_token
             .lock()
             .await
-            .insert(token_id.to_string(), retry_after_ms);
+            .insert(token_id.to_string(), token_retry_after_ms);
+        let global_failures = {
+            let mut guard = self.tick_metadata_rl_failures_global.lock().await;
+            let next = guard.saturating_add(1).min(32);
+            *guard = next;
+            next
+        };
+        let global_shift = global_failures.saturating_sub(1).min(8);
+        let global_backoff_ms = TICK_METADATA_RL_BACKOFF_BASE_MS
+            .saturating_mul(1_i64 << global_shift)
+            .clamp(
+                TICK_METADATA_RL_BACKOFF_BASE_MS,
+                TICK_METADATA_RL_BACKOFF_MAX_MS,
+            );
+        let global_retry_after_ms = now_ms.saturating_add(global_backoff_ms);
+        {
+            let mut guard = self.tick_metadata_retry_after_ms_global.lock().await;
+            if global_retry_after_ms > *guard {
+                *guard = global_retry_after_ms;
+            }
+        }
         warn!(
-            "Tick metadata backoff set token={} backoff_ms={} failures={}",
-            token_id, backoff_ms, failures
+            "Tick metadata backoff set token={} token_backoff_ms={} token_failures={} global_backoff_ms={} global_failures={}",
+            token_id,
+            token_backoff_ms,
+            token_failures,
+            global_backoff_ms,
+            global_failures
         );
-        retry_after_ms
+        token_retry_after_ms.max(global_retry_after_ms)
     }
 
     async fn clear_tick_metadata_backoff(&self, token_id: &str) {
