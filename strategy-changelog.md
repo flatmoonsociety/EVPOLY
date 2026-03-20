@@ -77,6 +77,18 @@ Older entries may reference env keys that were removed in later commits.
 
 ### 2026-03-20
 
+- `mm_sport_v1` now applies a simple WS bust-flow pause and randomized quote expiry cycle for pregame sports markets (`src/main.rs`, `src/mm/mod.rs`, `src/polymarket_ws.rs`, `.env.example`, `.env.full.example`):
+  - market WS bridge now consumes public `last_trade_price` events and keeps a short per-token market-trade window used by MM Sport bust checks.
+  - MM Sport bust trigger is now explicit (`bust_shares_1s >= 10000` by default over a `1s` window): if triggered at/under bid guard price, bot cancels MM Sport condition quotes and pauses quoting for a random `60s..300s`, then resumes normal ratio/depth re-evaluation.
+  - MM Sport quote submission is now always post-only `GTD` with randomized expiration `65s..125s`; live orders are tracked with expiry and replaced after expiry via normal cancel/requote flow.
+  - new env knobs:
+    - `EVPOLY_MM_SPORT_BUST_WINDOW_MS`
+    - `EVPOLY_MM_SPORT_BUST_SHARES_1S`
+    - `EVPOLY_MM_SPORT_BUST_PAUSE_MIN_SEC`
+    - `EVPOLY_MM_SPORT_BUST_PAUSE_MAX_SEC`
+    - `EVPOLY_MM_SPORT_QUOTE_EXPIRY_MIN_SEC`
+    - `EVPOLY_MM_SPORT_QUOTE_EXPIRY_MAX_SEC`
+
 - `mm_sport_v1` terminal fill persistence is now written atomically during MM Sport-owned reconciliation paths (`src/main.rs`):
   - when MM Sport sees terminal BUY fills from WS status updates or cancel/get-order reconciliation, it now writes canonical `ENTRY_FILL` (`entry_fill_order:<order_id>`) via `mark_pending_order_filled_with_event` instead of only flipping `pending_orders.status`.
   - canceled-with-partial-match BUY orders now persist matched units/notional into `trade_events`/`fills_v2`/`positions_v2` through the same atomic fill transition path.

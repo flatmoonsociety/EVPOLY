@@ -287,8 +287,14 @@ pub struct MmSportConfig {
     pub max_share_ratio: f64,
     pub min_top_depth_usd: f64,
     pub pause_after_fill_sec: u64,
+    pub bust_window_ms: i64,
+    pub bust_shares_1s: f64,
+    pub bust_pause_min_sec: u64,
+    pub bust_pause_max_sec: u64,
     pub ratio_breach_cancel_cooldown_ms: i64,
     pub reprice_min_interval_ms: i64,
+    pub quote_expiry_min_sec: u64,
+    pub quote_expiry_max_sec: u64,
     pub size_requote_delta_pct: f64,
     pub allowance_refresh_sec: u64,
     pub require_reward_eligible: bool,
@@ -306,6 +312,13 @@ impl Default for MmSportConfig {
 
 impl MmSportConfig {
     pub fn from_env() -> Self {
+        let bust_pause_min_sec = env_u64("EVPOLY_MM_SPORT_BUST_PAUSE_MIN_SEC", 60).clamp(1, 3_600);
+        let bust_pause_max_sec =
+            env_u64("EVPOLY_MM_SPORT_BUST_PAUSE_MAX_SEC", 300).clamp(bust_pause_min_sec, 7_200);
+        let quote_expiry_min_sec =
+            env_u64("EVPOLY_MM_SPORT_QUOTE_EXPIRY_MIN_SEC", 65).clamp(61, 3_600);
+        let quote_expiry_max_sec =
+            env_u64("EVPOLY_MM_SPORT_QUOTE_EXPIRY_MAX_SEC", 125).clamp(quote_expiry_min_sec, 7_200);
         Self {
             enable: env_bool("EVPOLY_STRATEGY_MM_SPORT_ENABLE", false),
             hard_disable: env_bool("EVPOLY_MM_SPORT_HARD_DISABLE", false),
@@ -328,6 +341,11 @@ impl MmSportConfig {
             min_top_depth_usd: env_f64("EVPOLY_MM_SPORT_MIN_TOP_DEPTH_USD", 100_000.0).max(0.0),
             pause_after_fill_sec: env_u64("EVPOLY_MM_SPORT_PAUSE_AFTER_FILL_SEC", 7_200)
                 .clamp(60, 86_400),
+            bust_window_ms: env_u64("EVPOLY_MM_SPORT_BUST_WINDOW_MS", 1_000).clamp(250, 5_000)
+                as i64,
+            bust_shares_1s: env_f64("EVPOLY_MM_SPORT_BUST_SHARES_1S", 10_000.0).max(1.0),
+            bust_pause_min_sec,
+            bust_pause_max_sec,
             ratio_breach_cancel_cooldown_ms: env_u64(
                 "EVPOLY_MM_SPORT_RATIO_BREACH_CANCEL_COOLDOWN_MS",
                 200,
@@ -335,6 +353,8 @@ impl MmSportConfig {
             .clamp(50, 60_000) as i64,
             reprice_min_interval_ms: env_u64("EVPOLY_MM_SPORT_REPRICE_MIN_INTERVAL_MS", 600)
                 .clamp(50, 60_000) as i64,
+            quote_expiry_min_sec,
+            quote_expiry_max_sec,
             size_requote_delta_pct: env_f64("EVPOLY_MM_SPORT_SIZE_REQUOTE_DELTA_PCT", 0.03)
                 .clamp(0.0, 1.0),
             allowance_refresh_sec: env_u64("EVPOLY_MM_SPORT_ALLOWANCE_REFRESH_SEC", 60)
