@@ -61,7 +61,7 @@ pub async fn scan_rank_auto_candidates(
     let rewards_page_budget_fast = std::env::var("EVPOLY_MM_REWARDS_PAGE_BUDGET_FAST")
         .ok()
         .and_then(|v| v.trim().parse::<u32>().ok())
-        .unwrap_or(4)
+        .unwrap_or(1)
         .clamp(1, 200);
     let gamma_fallback_enable = std::env::var("EVPOLY_MM_REWARDS_GAMMA_FALLBACK_ENABLE")
         .ok()

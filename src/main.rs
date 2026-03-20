@@ -650,6 +650,22 @@ fn env_nonempty_named(name: &str) -> Option<String> {
     })
 }
 
+fn mm_rewards_page_budget_fast_default() -> u32 {
+    1
+}
+
+fn mm_rewards_page_timeout_ms(page_budget: u32) -> u64 {
+    2_500_u64
+        .saturating_add(u64::from(page_budget.saturating_sub(1)).saturating_mul(1_500))
+        .clamp(2_500, 15_000)
+}
+
+fn mm_rewards_gamma_timeout_ms(scan_pages: u32) -> u64 {
+    3_500_u64
+        .saturating_add(u64::from(scan_pages.saturating_sub(1)).saturating_mul(700))
+        .clamp(3_500, 30_000)
+}
+
 fn remote_url_default_named(name: &str) -> Option<&'static str> {
     match name {
         "EVPOLY_REMOTE_PREMARKET_ALPHA_URL" => {
@@ -15952,9 +15968,14 @@ async fn main() -> Result<()> {
                 generated_at_ms: i64,
                 ranked_generated_at_ms: i64,
                 ranked_from_cache: bool,
+                source_page_budget: u32,
+                source_page_timeout_ms: u64,
+                source_gamma_pages: u32,
+                source_gamma_timeout_ms: u64,
                 source_page_rows: usize,
                 source_gamma_rows: usize,
                 source_error_count: usize,
+                source_errors: Vec<String>,
                 high_count: u64,
                 competition_by_condition: std::collections::HashMap<String, f64>,
                 competition_by_slug: std::collections::HashMap<String, f64>,
@@ -16012,7 +16033,7 @@ async fn main() -> Result<()> {
             let mm_rewards_page_budget_fast = std::env::var("EVPOLY_MM_REWARDS_PAGE_BUDGET_FAST")
                 .ok()
                 .and_then(|v| v.trim().parse::<u32>().ok())
-                .unwrap_or(4)
+                .unwrap_or(mm_rewards_page_budget_fast_default())
                 .clamp(1, 200);
             let mm_rewards_gamma_fallback_enable =
                 env_bool_named("EVPOLY_MM_REWARDS_GAMMA_FALLBACK_ENABLE", false);
@@ -16034,12 +16055,14 @@ async fn main() -> Result<()> {
                 loop {
                     let now_ms = chrono::Utc::now().timestamp_millis();
                     let gamma_scan_pages = mm_cfg_for_bg_refresh.auto_scan_limit.max(20);
+                    let page_timeout_ms = mm_rewards_page_timeout_ms(mm_rewards_page_budget_fast);
+                    let gamma_timeout_ms = mm_rewards_gamma_timeout_ms(gamma_scan_pages);
                     let mut all_rows = Vec::new();
                     let mut source_page_rows = 0_usize;
                     let mut source_gamma_rows = 0_usize;
                     let mut refresh_errors = Vec::new();
                     let page_res = tokio::time::timeout(
-                        tokio::time::Duration::from_millis(2_500),
+                        tokio::time::Duration::from_millis(page_timeout_ms),
                         api_for_bg_refresh.get_rewards_markets_api(
                             mm_rewards_page_budget_fast,
                             None,
@@ -16058,7 +16081,7 @@ async fn main() -> Result<()> {
                     }
                     if mm_rewards_gamma_fallback_enable {
                         let gamma_res = tokio::time::timeout(
-                            tokio::time::Duration::from_millis(3_500),
+                            tokio::time::Duration::from_millis(gamma_timeout_ms),
                             api_for_bg_refresh.get_rewards_markets_gamma(500, gamma_scan_pages),
                         )
                         .await;
@@ -16165,9 +16188,14 @@ async fn main() -> Result<()> {
                             last_good_ranked_ms
                         },
                         ranked_from_cache: !last_good_ranked_candidates.is_empty(),
+                        source_page_budget: mm_rewards_page_budget_fast,
+                        source_page_timeout_ms: page_timeout_ms,
+                        source_gamma_pages: gamma_scan_pages,
+                        source_gamma_timeout_ms: gamma_timeout_ms,
                         source_page_rows,
                         source_gamma_rows,
                         source_error_count: refresh_errors.len(),
+                        source_errors: refresh_errors.clone(),
                         high_count,
                         competition_by_condition: next_competition_by_condition.clone(),
                         competition_by_slug: next_competition_by_slug.clone(),
@@ -16260,9 +16288,14 @@ async fn main() -> Result<()> {
                             now_ms
                         },
                         ranked_from_cache,
+                        source_page_budget: mm_rewards_page_budget_fast,
+                        source_page_timeout_ms: page_timeout_ms,
+                        source_gamma_pages: gamma_scan_pages,
+                        source_gamma_timeout_ms: gamma_timeout_ms,
                         source_page_rows,
                         source_gamma_rows,
                         source_error_count: refresh_errors.len(),
+                        source_errors: refresh_errors.clone(),
                         high_count,
                         competition_by_condition: next_competition_by_condition,
                         competition_by_slug: next_competition_by_slug,
@@ -16721,6 +16754,10 @@ async fn main() -> Result<()> {
                                         "mm_rewards_competition_snapshot",
                                         json!({
                                             "strategy_id": STRATEGY_ID_MM_REWARDS_V1,
+                                            "page_budget": snapshot.source_page_budget,
+                                            "page_timeout_ms": snapshot.source_page_timeout_ms,
+                                            "gamma_pages": snapshot.source_gamma_pages,
+                                            "gamma_timeout_ms": snapshot.source_gamma_timeout_ms,
                                             "tracked_conditions": mm_rewards_competition_by_condition.len(),
                                             "tracked_slugs": mm_rewards_competition_by_slug.len(),
                                             "reward_daily_conditions": mm_rewards_daily_rate_by_condition.len(),
@@ -16731,6 +16768,7 @@ async fn main() -> Result<()> {
                                             "source_page_rows": snapshot.source_page_rows,
                                             "source_gamma_rows": snapshot.source_gamma_rows,
                                             "source_error_count": snapshot.source_error_count,
+                                            "errors": snapshot.source_errors,
                                             "source": "background_worker"
                                         }),
                                     );
@@ -16744,9 +16782,14 @@ async fn main() -> Result<()> {
                                         json!({
                                             "strategy_id": STRATEGY_ID_MM_REWARDS_V1,
                                             "error": "rewards_snapshot_no_usable_rows_kept_last_good",
+                                            "page_budget": snapshot.source_page_budget,
+                                            "page_timeout_ms": snapshot.source_page_timeout_ms,
+                                            "gamma_pages": snapshot.source_gamma_pages,
+                                            "gamma_timeout_ms": snapshot.source_gamma_timeout_ms,
                                             "source_page_rows": snapshot.source_page_rows,
                                             "source_gamma_rows": snapshot.source_gamma_rows,
                                             "source_error_count": snapshot.source_error_count,
+                                            "errors": snapshot.source_errors,
                                             "source": "background_worker"
                                         }),
                                     );
@@ -16764,12 +16807,14 @@ async fn main() -> Result<()> {
                             >= competition_refresh_ms
                     {
                         let gamma_scan_pages = mm_cfg_for_loop.auto_scan_limit.max(20);
+                        let page_timeout_ms = mm_rewards_page_timeout_ms(mm_rewards_page_budget_fast);
+                        let gamma_timeout_ms = mm_rewards_gamma_timeout_ms(gamma_scan_pages);
                         let mut all_rows = Vec::new();
                         let mut source_page_rows = 0_usize;
                         let mut source_gamma_rows = 0_usize;
                         let mut refresh_errors = Vec::new();
                         let page_res = tokio::time::timeout(
-                            tokio::time::Duration::from_millis(2_500),
+                            tokio::time::Duration::from_millis(page_timeout_ms),
                             api_for_mm_rewards.get_rewards_markets_api(
                                 mm_rewards_page_budget_fast,
                                 None,
@@ -16788,7 +16833,7 @@ async fn main() -> Result<()> {
                         }
                         if mm_rewards_gamma_fallback_enable {
                             let gamma_res = tokio::time::timeout(
-                                tokio::time::Duration::from_millis(3_500),
+                                tokio::time::Duration::from_millis(gamma_timeout_ms),
                                 api_for_mm_rewards.get_rewards_markets_gamma(500, gamma_scan_pages),
                             )
                             .await;
@@ -16812,6 +16857,13 @@ async fn main() -> Result<()> {
                                     json!({
                                         "strategy_id": STRATEGY_ID_MM_REWARDS_V1,
                                         "error": "rewards_snapshot_empty_kept_last_good",
+                                        "page_budget": mm_rewards_page_budget_fast,
+                                        "page_timeout_ms": page_timeout_ms,
+                                        "gamma_pages": gamma_scan_pages,
+                                        "gamma_timeout_ms": gamma_timeout_ms,
+                                        "source_page_rows": source_page_rows,
+                                        "source_gamma_rows": source_gamma_rows,
+                                        "source_error_count": refresh_errors.len(),
                                         "errors": refresh_errors
                                     }),
                                 );
@@ -16904,8 +16956,13 @@ async fn main() -> Result<()> {
                                         json!({
                                             "strategy_id": STRATEGY_ID_MM_REWARDS_V1,
                                             "error": "rewards_snapshot_no_usable_rows_kept_last_good",
+                                            "page_budget": mm_rewards_page_budget_fast,
+                                            "page_timeout_ms": page_timeout_ms,
+                                            "gamma_pages": gamma_scan_pages,
+                                            "gamma_timeout_ms": gamma_timeout_ms,
                                             "source_page_rows": source_page_rows,
                                             "source_gamma_rows": source_gamma_rows,
+                                            "source_error_count": refresh_errors.len(),
                                             "errors": refresh_errors
                                         }),
                                     );
@@ -16922,6 +16979,10 @@ async fn main() -> Result<()> {
                                     "mm_rewards_competition_snapshot",
                                     json!({
                                         "strategy_id": STRATEGY_ID_MM_REWARDS_V1,
+                                        "page_budget": mm_rewards_page_budget_fast,
+                                        "page_timeout_ms": page_timeout_ms,
+                                        "gamma_pages": gamma_scan_pages,
+                                        "gamma_timeout_ms": gamma_timeout_ms,
                                         "tracked_conditions": mm_rewards_competition_by_condition.len(),
                                         "tracked_slugs": mm_rewards_competition_by_slug.len(),
                                         "reward_daily_conditions": mm_rewards_daily_rate_by_condition.len(),
@@ -16931,7 +16992,8 @@ async fn main() -> Result<()> {
                                         "high_count": high_count,
                                         "source_page_rows": source_page_rows,
                                         "source_gamma_rows": source_gamma_rows,
-                                        "source_error_count": refresh_errors.len()
+                                        "source_error_count": refresh_errors.len(),
+                                        "errors": refresh_errors
                                     }),
                                 );
                             }
