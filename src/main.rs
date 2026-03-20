@@ -45,8 +45,9 @@ use polymarket_arbitrage_bot::feature_engine_v2::FeatureEngineV2;
 use polymarket_arbitrage_bot::hl_signals::{self, HlSignalsConfig};
 use polymarket_arbitrage_bot::hyperliquid_wss::{self, HyperliquidWssConfig};
 use polymarket_arbitrage_bot::market_discovery::{
-    discover_market, discover_solana_market, discover_xrp_market, eth_disabled_fallback_market,
-    get_or_discover_markets, solana_disabled_fallback_market, xrp_disabled_fallback_market,
+    btc_disabled_fallback_market, discover_market, discover_solana_market, discover_xrp_market,
+    eth_disabled_fallback_market, get_or_discover_markets, solana_disabled_fallback_market,
+    xrp_disabled_fallback_market,
 };
 use polymarket_arbitrage_bot::mm::{self, MmMode};
 use polymarket_arbitrage_bot::models::Market;
@@ -3047,7 +3048,16 @@ async fn main() -> Result<()> {
         }
     }
 
-    if !is_simulation && env_bool_named("EVPOLY_MARKET_PREWARM_ENABLE", true) {
+    let core_strategy_enabled = env_bool_named("EVPOLY_STRATEGY_PREMARKET_ENABLE", true)
+        || env_bool_named("EVPOLY_STRATEGY_ENDGAME_ENABLE", true)
+        || env_bool_named("EVPOLY_STRATEGY_EVCURVE_ENABLE", true)
+        || env_bool_named("EVPOLY_STRATEGY_SESSIONBAND_ENABLE", true)
+        || env_bool_named("EVPOLY_STRATEGY_EVSNIPE_ENABLE", true);
+    let mm_strategy_enabled = env_bool_named("EVPOLY_STRATEGY_MM_REWARDS_ENABLE", false)
+        || env_bool_named("EVPOLY_STRATEGY_MM_SPORT_ENABLE", false);
+    let mm_only_mode = !core_strategy_enabled && mm_strategy_enabled;
+
+    if !is_simulation && !mm_only_mode && env_bool_named("EVPOLY_MARKET_PREWARM_ENABLE", true) {
         let mut prewarm_symbols = vec!["BTC".to_string()];
         if config.trading.enable_eth_trading {
             prewarm_symbols.push("ETH".to_string());
@@ -3457,10 +3467,35 @@ async fn main() -> Result<()> {
         }),
     );
 
-    // Get market data for BTC (required) and optional markets.
-    eprintln!("🔍 Discovering markets (BTC required; ETH/SOL/XRP optional by config)...");
-    let (eth_market_data, btc_market_data, solana_market_data, xrp_market_data) =
-        get_or_discover_markets(&api, &config).await?;
+    // Get core crypto market data when core strategies are enabled.
+    // MM-only mode skips this startup discovery by design.
+    let (eth_market_data, btc_market_data, solana_market_data, xrp_market_data) = if mm_only_mode {
+        eprintln!(
+            "⏭️ Skipping core market discovery (MM-only mode: no premarket/endgame/evcurve/sessionband/evsnipe)"
+        );
+        log_event(
+            "core_discovery_skipped_mm_only",
+            json!({
+                "simulation_mode": is_simulation,
+                "premarket_enabled": env_bool_named("EVPOLY_STRATEGY_PREMARKET_ENABLE", true),
+                "endgame_enabled": env_bool_named("EVPOLY_STRATEGY_ENDGAME_ENABLE", true),
+                "evcurve_enabled": env_bool_named("EVPOLY_STRATEGY_EVCURVE_ENABLE", true),
+                "sessionband_enabled": env_bool_named("EVPOLY_STRATEGY_SESSIONBAND_ENABLE", true),
+                "evsnipe_enabled": env_bool_named("EVPOLY_STRATEGY_EVSNIPE_ENABLE", true),
+                "mm_rewards_enabled": env_bool_named("EVPOLY_STRATEGY_MM_REWARDS_ENABLE", false),
+                "mm_sport_enabled": env_bool_named("EVPOLY_STRATEGY_MM_SPORT_ENABLE", false)
+            }),
+        );
+        (
+            eth_disabled_fallback_market(),
+            btc_disabled_fallback_market(),
+            solana_disabled_fallback_market(),
+            xrp_disabled_fallback_market(),
+        )
+    } else {
+        eprintln!("🔍 Discovering markets (BTC required; ETH/SOL/XRP optional by config)...");
+        get_or_discover_markets(&api, &config).await?
+    };
 
     let tracking_db_for_startup_maintenance = tracking_db.clone();
     tokio::spawn(async move {
@@ -3553,7 +3588,7 @@ async fn main() -> Result<()> {
         }
     });
 
-    if !is_simulation && env_bool_named("EVPOLY_MARKET_PREWARM_ENABLE", true) {
+    if !is_simulation && !mm_only_mode && env_bool_named("EVPOLY_MARKET_PREWARM_ENABLE", true) {
         let mut current_tokens: Vec<(String, String)> = Vec::new();
         for (symbol, market) in [
             ("BTC", &btc_market_data),
@@ -27354,101 +27389,83 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Start a background task to detect new 15-minute periods and discover new markets
-    let monitor_for_period_check = monitor_arc.clone();
-    let api_for_period_check = api.clone();
-    let trader_for_period_reset = trader_clone.clone();
-    let detector_for_period_reset = detector_arc.clone();
-    let enable_eth_trading = config.trading.enable_eth_trading;
-    let enable_solana_trading = config.trading.enable_solana_trading;
-    let enable_xrp_trading = config.trading.enable_xrp_trading;
-    tokio::spawn(async move {
-        loop {
-            let current_time = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
+    // Start a background task to detect new 15-minute periods and discover new markets.
+    if !mm_only_mode {
+        let monitor_for_period_check = monitor_arc.clone();
+        let api_for_period_check = api.clone();
+        let trader_for_period_reset = trader_clone.clone();
+        let detector_for_period_reset = detector_arc.clone();
+        let enable_eth_trading = config.trading.enable_eth_trading;
+        let enable_solana_trading = config.trading.enable_solana_trading;
+        let enable_xrp_trading = config.trading.enable_xrp_trading;
+        tokio::spawn(async move {
+            loop {
+                let current_time = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs();
 
-            let current_period = (current_time / 900) * 900;
-            let current_market_timestamp = monitor_for_period_check
-                .get_current_market_timestamp()
-                .await;
+                let current_period = (current_time / 900) * 900;
+                let current_market_timestamp = monitor_for_period_check
+                    .get_current_market_timestamp()
+                    .await;
 
-            // Check if we need to discover a new market (current market is from a different period)
-            if current_market_timestamp != current_period {
-                eprintln!(
-                    "🔄 Market period mismatch detected! Current market: {}, Current period: {}",
-                    current_market_timestamp, current_period
-                );
-                // Fall through to discover new market immediately
-            } else {
-                // Calculate when next period starts
-                let next_period_timestamp = current_period + 900;
-                let sleep_duration = if next_period_timestamp > current_time {
-                    next_period_timestamp - current_time
+                // Check if we need to discover a new market (current market is from a different period)
+                if current_market_timestamp != current_period {
+                    eprintln!(
+                        "🔄 Market period mismatch detected! Current market: {}, Current period: {}",
+                        current_market_timestamp, current_period
+                    );
+                    // Fall through to discover new market immediately
                 } else {
-                    0 // Next period already started
-                };
+                    // Calculate when next period starts
+                    let next_period_timestamp = current_period + 900;
+                    let sleep_duration = if next_period_timestamp > current_time {
+                        next_period_timestamp - current_time
+                    } else {
+                        0 // Next period already started
+                    };
+
+                    eprintln!(
+                        "⏰ Current market period: {}, next period starts in {} seconds",
+                        current_market_timestamp, sleep_duration
+                    );
+
+                    // Only sleep if we have a reasonable duration (avoid infinite loops)
+                    if sleep_duration > 0 && sleep_duration < 1800 {
+                        tokio::time::sleep(tokio::time::Duration::from_secs(sleep_duration)).await;
+                    } else if sleep_duration == 0 {
+                        // Next period already started, discover new market immediately
+                        eprintln!("🔄 Next period already started, discovering new market...");
+                    } else {
+                        // If calculation is wrong, wait a bit and recalculate
+                        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                        continue;
+                    }
+                }
+
+                // Recalculate current time and period after sleep
+                let current_time = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs();
+                let current_period = (current_time / 900) * 900;
 
                 eprintln!(
-                    "⏰ Current market period: {}, next period starts in {} seconds",
-                    current_market_timestamp, sleep_duration
+                    "🔄 New 15-minute period detected! (Period: {}) Discovering new markets...",
+                    current_period
                 );
 
-                // Only sleep if we have a reasonable duration (avoid infinite loops)
-                if sleep_duration > 0 && sleep_duration < 1800 {
-                    tokio::time::sleep(tokio::time::Duration::from_secs(sleep_duration)).await;
-                } else if sleep_duration == 0 {
-                    // Next period already started, discover new market immediately
-                    eprintln!("🔄 Next period already started, discovering new market...");
-                } else {
-                    // If calculation is wrong, wait a bit and recalculate
-                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-                    continue;
-                }
-            }
+                let mut seen_ids = std::collections::HashSet::new();
+                let (eth_id, btc_id) = monitor_for_period_check.get_current_condition_ids().await;
+                seen_ids.insert(eth_id);
+                seen_ids.insert(btc_id);
 
-            // Recalculate current time and period after sleep
-            let current_time = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
-            let current_period = (current_time / 900) * 900;
-
-            eprintln!(
-                "🔄 New 15-minute period detected! (Period: {}) Discovering new markets...",
-                current_period
-            );
-
-            let mut seen_ids = std::collections::HashSet::new();
-            let (eth_id, btc_id) = monitor_for_period_check.get_current_condition_ids().await;
-            seen_ids.insert(eth_id);
-            seen_ids.insert(btc_id);
-
-            // Discover BTC (required) and optional markets for the new period.
-            let btc_market = match discover_market(
-                &api_for_period_check,
-                "BTC",
-                &["btc"],
-                current_time,
-                &mut seen_ids,
-            )
-            .await
-            {
-                Ok(market) => market,
-                Err(e) => {
-                    warn!("Failed to discover new BTC market: {}", e);
-                    tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
-                    continue;
-                }
-            };
-            seen_ids.insert(btc_market.condition_id.clone());
-
-            let eth_market = if enable_eth_trading {
-                match discover_market(
+                // Discover BTC (required) and optional markets for the new period.
+                let btc_market = match discover_market(
                     &api_for_period_check,
-                    "ETH",
-                    &["eth"],
+                    "BTC",
+                    &["btc"],
                     current_time,
                     &mut seen_ids,
                 )
@@ -27456,40 +27473,62 @@ async fn main() -> Result<()> {
                 {
                     Ok(market) => market,
                     Err(e) => {
-                        warn!(
-                            "Failed to discover new ETH market: {}. Using fallback for this period.",
-                            e
-                        );
-                        eth_disabled_fallback_market()
+                        warn!("Failed to discover new BTC market: {}", e);
+                        tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+                        continue;
                     }
+                };
+                seen_ids.insert(btc_market.condition_id.clone());
+
+                let eth_market = if enable_eth_trading {
+                    match discover_market(
+                        &api_for_period_check,
+                        "ETH",
+                        &["eth"],
+                        current_time,
+                        &mut seen_ids,
+                    )
+                    .await
+                    {
+                        Ok(market) => market,
+                        Err(e) => {
+                            warn!(
+                                "Failed to discover new ETH market: {}. Using fallback for this period.",
+                                e
+                            );
+                            eth_disabled_fallback_market()
+                        }
+                    }
+                } else {
+                    eth_disabled_fallback_market()
+                };
+
+                let solana_market = if enable_solana_trading {
+                    discover_solana_market(&api_for_period_check, current_time, &mut seen_ids).await
+                } else {
+                    solana_disabled_fallback_market()
+                };
+
+                let xrp_market = if enable_xrp_trading {
+                    discover_xrp_market(&api_for_period_check, current_time, &mut seen_ids).await
+                } else {
+                    xrp_disabled_fallback_market()
+                };
+
+                if let Err(e) = monitor_for_period_check
+                    .update_markets(eth_market, btc_market, solana_market, xrp_market)
+                    .await
+                {
+                    warn!("Failed to update markets: {}", e);
+                } else {
+                    trader_for_period_reset.reset_period(current_period).await;
+                    detector_for_period_reset.reset_period().await;
                 }
-            } else {
-                eth_disabled_fallback_market()
-            };
-
-            let solana_market = if enable_solana_trading {
-                discover_solana_market(&api_for_period_check, current_time, &mut seen_ids).await
-            } else {
-                solana_disabled_fallback_market()
-            };
-
-            let xrp_market = if enable_xrp_trading {
-                discover_xrp_market(&api_for_period_check, current_time, &mut seen_ids).await
-            } else {
-                xrp_disabled_fallback_market()
-            };
-
-            if let Err(e) = monitor_for_period_check
-                .update_markets(eth_market, btc_market, solana_market, xrp_market)
-                .await
-            {
-                warn!("Failed to update markets: {}", e);
-            } else {
-                trader_for_period_reset.reset_period(current_period).await;
-                detector_for_period_reset.reset_period().await;
             }
-        }
-    });
+        });
+    } else {
+        eprintln!("⏭️ Core period-discovery worker skipped (MM-only mode)");
+    }
 
     monitor_arc
         .start_monitoring(move |_snapshot| async move {})

@@ -77,6 +77,12 @@ Older entries may reference env keys that were removed in later commits.
 
 ### 2026-03-20
 
+- Core startup market discovery is now skipped in MM-only runtime mode (`src/main.rs`, `src/market_discovery.rs`, `src/monitor.rs`):
+  - when all core strategies are disabled (`premarket_v1`, `endgame_sweep_v1`, `evcurve_v1`, `sessionband_v1`, `evsnipe_v1`) and at least one MM strategy is enabled (`mm_rewards_v1` and/or `mm_sport_v1`), bot now skips startup BTC/ETH/SOL/XRP discovery and logs `core_discovery_skipped_mm_only`.
+  - MM-only mode now initializes monitor markets with explicit fallback placeholders (`dummy_*_fallback`, including BTC) and skips the legacy 15-minute core period-discovery worker.
+  - startup/current-market metadata prewarm loops are also skipped in MM-only mode so MM runtimes do not keep emitting core crypto discovery noise.
+  - affects MM-only deployments where operator intentionally runs MM strategies without core crypto strategies.
+
 - `mm_sport_v1` quote GTD expiry defaults and per-market sampling were updated for pregame sports MM quoting (`src/main.rs`, `src/mm/mod.rs`, `.env.example`, `.env.full.example`):
   - default randomized quote expiry window changed from `65s..125s` to `300s..600s`:
     - `EVPOLY_MM_SPORT_QUOTE_EXPIRY_MIN_SEC=300`
