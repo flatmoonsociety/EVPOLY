@@ -201,6 +201,7 @@ struct MmSportDiscoveryReport {
     skipped_non_sports: usize,
     skipped_non_match: usize,
     skipped_not_pregame: usize,
+    skipped_missing_start_time: usize,
     skipped_not_reward_eligible: usize,
     skipped_missing_tokens: usize,
     clob_detail_ok: usize,
@@ -932,6 +933,28 @@ fn mm_sport_force_exit_mode(now_ms: i64, game_start_ts_ms: i64) -> bool {
         && now_ms < game_start_ts_ms
 }
 
+fn mm_sport_game_start_ts_ms_from_clob(
+    details: &polymarket_arbitrage_bot::models::MarketDetails,
+) -> Option<i64> {
+    details
+        .game_start_time
+        .as_deref()
+        .and_then(parse_rfc3339_to_ts_ms)
+}
+
+fn mm_sport_game_start_ts_ms_from_gamma(market: &Market) -> Option<i64> {
+    market
+        .game_start_time
+        .as_deref()
+        .and_then(parse_rfc3339_to_ts_ms)
+        .or_else(|| {
+            market
+                .start_date
+                .as_deref()
+                .and_then(parse_rfc3339_to_ts_ms)
+        })
+}
+
 fn mm_sport_is_sports_market(tags: &[String], primary_slug: &str, fallback_slug: &str) -> bool {
     let tags_match = tags.iter().any(|tag| {
         let normalized = tag.trim().to_ascii_lowercase();
@@ -1080,7 +1103,6 @@ fn mm_sport_size_shares_from_pending(row: &PendingOrderRecord) -> Option<f64> {
 
 const MM_SPORT_LOW_DEPTH_FLOOR_USD: f64 = 50_000.0;
 const MM_SPORT_LOW_DEPTH_QUOTE_SIZE_MULT: f64 = 1.2;
-const MM_SPORT_RATIO_BREACH_PAUSE_MS: i64 = 15 * 60 * 1_000;
 const MM_SPORT_FORCE_EXIT_WINDOW_MS: i64 = 5 * 60 * 1_000;
 const MM_SPORT_EXIT_FALLBACK_REFRESH_MS: i64 = 60_000;
 const MM_SPORT_DISCOVERY_EMPTY_BACKOFF_MIN_MS: i64 = 5_000;
@@ -1274,12 +1296,7 @@ async fn mm_sport_discover_markets(
                 market_slug = details.market_slug.clone();
                 question = details.question.clone();
                 tags = details.tags.clone();
-                game_start_ts_ms = details
-                    .game_start_time
-                    .as_deref()
-                    .and_then(parse_rfc3339_to_ts_ms)
-                    .or_else(|| parse_rfc3339_to_ts_ms(details.end_date_iso.as_str()))
-                    .unwrap_or(0);
+                game_start_ts_ms = mm_sport_game_start_ts_ms_from_clob(&details).unwrap_or(0);
                 let (up, down) = match mm_sport_extract_binary_token_ids(&details.tokens) {
                     Some(value) => value,
                     None => {
@@ -1342,23 +1359,8 @@ async fn mm_sport_discover_markets(
                         if !gamma_market.question.trim().is_empty() {
                             question = gamma_market.question.trim().to_string();
                         }
-                        game_start_ts_ms = gamma_market
-                            .end_date_iso
-                            .as_deref()
-                            .and_then(parse_rfc3339_to_ts_ms)
-                            .or_else(|| {
-                                gamma_market
-                                    .end_date_iso_alt
-                                    .as_deref()
-                                    .and_then(parse_rfc3339_to_ts_ms)
-                            })
-                            .or_else(|| {
-                                gamma_market
-                                    .end_date
-                                    .as_deref()
-                                    .and_then(parse_rfc3339_to_ts_ms)
-                            })
-                            .unwrap_or(0);
+                        game_start_ts_ms =
+                            mm_sport_game_start_ts_ms_from_gamma(&gamma_market).unwrap_or(0);
                         let (up, down) =
                             match mm_sport_extract_binary_token_ids_from_gamma(&gamma_market) {
                                 Some(value) => value,
@@ -1395,7 +1397,11 @@ async fn mm_sport_discover_markets(
             report.skipped_non_match = report.skipped_non_match.saturating_add(1);
             continue;
         }
-        if cfg.pregame_only && (game_start_ts_ms <= 0 || game_start_ts_ms <= now_ms) {
+        if cfg.pregame_only && game_start_ts_ms <= 0 {
+            report.skipped_missing_start_time = report.skipped_missing_start_time.saturating_add(1);
+            continue;
+        }
+        if cfg.pregame_only && game_start_ts_ms <= now_ms {
             report.skipped_not_pregame = report.skipped_not_pregame.saturating_add(1);
             continue;
         }
@@ -12872,7 +12878,7 @@ async fn main() -> Result<()> {
             );
         } else {
             eprintln!(
-                "🏀 MM Sport enabled (poll_ms={}, event_driven={}, event_fallback_poll_ms={}, ws_stale_ms={}, discovery_refresh_sec={}, rewards_page_budget={}, min_reward_rate_per_day={:.2}, quote_size_mult={:.3}, max_share_ratio={:.3}, min_top_depth_usd={:.2}, pause_after_fill_sec={}, post_only={}, require_reward_eligible={}, pregame_only={}, match_only={}, max_markets={})",
+                "🏀 MM Sport enabled (poll_ms={}, event_driven={}, event_fallback_poll_ms={}, ws_stale_ms={}, discovery_refresh_sec={}, rewards_page_budget={}, min_reward_rate_per_day={:.2}, quote_size_mult={:.3}, max_share_ratio={:.3}, min_top_depth_usd={:.2}, pause_after_fill_sec={}, ratio_breach_pause_sec={}, ratio_breach_cancel_cooldown_ms={}, post_only={}, require_reward_eligible={}, pregame_only={}, match_only={}, max_markets={})",
                 mm_sport_cfg.poll_ms,
                 mm_sport_cfg.event_driven_enable,
                 mm_sport_cfg.event_fallback_poll_ms,
@@ -12884,6 +12890,8 @@ async fn main() -> Result<()> {
                 mm_sport_cfg.max_share_ratio,
                 mm_sport_cfg.min_top_depth_usd,
                 mm_sport_cfg.pause_after_fill_sec,
+                mm_sport_cfg.ratio_breach_pause_sec,
+                mm_sport_cfg.ratio_breach_cancel_cooldown_ms,
                 mm_sport_cfg.post_only,
                 mm_sport_cfg.require_reward_eligible,
                 mm_sport_cfg.pregame_only,
@@ -12893,7 +12901,6 @@ async fn main() -> Result<()> {
 
             let api_for_mm_sport = api.clone();
             let tracking_db_for_mm_sport = tracking_db.clone();
-            let trader_for_mm_sport = trader_clone.clone();
             let polymarket_ws_for_mm_sport = polymarket_ws_state.clone();
             let mm_sport_cfg_for_loop = mm_sport_cfg.clone();
             tokio::spawn(async move {
@@ -12914,7 +12921,11 @@ async fn main() -> Result<()> {
                     std::collections::HashSet::new();
                 let mut ws_matched_by_order_id: std::collections::HashMap<String, f64> =
                     std::collections::HashMap::new();
-                let mut pause_until_by_condition: std::collections::HashMap<String, i64> =
+                let mut entry_pause_until_by_condition: std::collections::HashMap<String, i64> =
+                    std::collections::HashMap::new();
+                let mut ratio_pause_until_by_condition: std::collections::HashMap<String, i64> =
+                    std::collections::HashMap::new();
+                let mut last_ratio_cancel_ms_by_condition: std::collections::HashMap<String, i64> =
                     std::collections::HashMap::new();
                 let mut last_allowance_refresh_ms_by_token: std::collections::HashMap<String, i64> =
                     std::collections::HashMap::new();
@@ -13094,6 +13105,7 @@ async fn main() -> Result<()> {
                                         "skipped_non_sports": discovery_report.skipped_non_sports,
                                         "skipped_non_match": discovery_report.skipped_non_match,
                                         "skipped_not_pregame": discovery_report.skipped_not_pregame,
+                                        "skipped_missing_start_time": discovery_report.skipped_missing_start_time,
                                         "skipped_not_reward_eligible": discovery_report.skipped_not_reward_eligible,
                                         "skipped_missing_tokens": discovery_report.skipped_missing_tokens,
                                         "clob_detail_ok": discovery_report.clob_detail_ok,
@@ -13160,6 +13172,11 @@ async fn main() -> Result<()> {
                             if !seen_fill_event_keys.insert(event.event_key.clone()) {
                                 continue;
                             }
+                            let inventory_increasing_fill = event.side.eq_ignore_ascii_case("BUY")
+                                && event.event_type.eq_ignore_ascii_case("ENTRY_FILL");
+                            if !inventory_increasing_fill {
+                                continue;
+                            }
                             let condition_id = event.condition_id.trim();
                             if condition_id.is_empty() {
                                 continue;
@@ -13173,7 +13190,7 @@ async fn main() -> Result<()> {
                                 .ok()
                                 .unwrap_or(900_000),
                             );
-                            let entry = pause_until_by_condition
+                            let entry = entry_pause_until_by_condition
                                 .entry(condition_id.to_string())
                                 .or_insert(0);
                             if pause_until > *entry {
@@ -13194,20 +13211,34 @@ async fn main() -> Result<()> {
                             );
                         }
                         for condition_id in paused_conditions {
-                            let _ = trader_for_mm_sport
-                                .cancel_pending_orders_for_strategy_condition(
+                            if let Ok(rows) = tracking_db_for_mm_sport
+                                .list_open_pending_orders_for_strategy_condition(
                                     STRATEGY_ID_MM_SPORT_V1,
                                     condition_id.as_str(),
-                                    "mm_sport_fill_pause",
+                                )
+                            {
+                                let buy_rows = rows
+                                    .into_iter()
+                                    .filter(|row| row.side.eq_ignore_ascii_case("BUY"))
+                                    .collect::<Vec<_>>();
+                                let _ = mm_sport_cancel_pending_rows(
+                                    &api_for_mm_sport,
+                                    &tracking_db_for_mm_sport,
+                                    buy_rows.as_slice(),
                                 )
                                 .await;
+                            }
                         }
                     }
                     if seen_fill_event_keys.len() > 250_000 {
                         seen_fill_event_keys.clear();
                     }
 
-                    pause_until_by_condition.retain(|_, until| *until > now_ms);
+                    entry_pause_until_by_condition.retain(|_, until| *until > now_ms);
+                    ratio_pause_until_by_condition.retain(|_, until| *until > now_ms);
+                    last_ratio_cancel_ms_by_condition.retain(|_, last_cancel_ms| {
+                        now_ms.saturating_sub(*last_cancel_ms) <= 86_400_000
+                    });
 
                     let mut inventory_by_token: std::collections::HashMap<String, f64> =
                         std::collections::HashMap::new();
@@ -13296,6 +13327,11 @@ async fn main() -> Result<()> {
                                     ws_matched_by_order_id.insert(order_id.to_string(), matched);
                                 }
                                 if has_new_match {
+                                    let inventory_increasing_fill =
+                                        row.side.eq_ignore_ascii_case("BUY");
+                                    if !inventory_increasing_fill {
+                                        continue;
+                                    }
                                     let Some(condition_id) = row.condition_id.as_deref() else {
                                         continue;
                                     };
@@ -13311,7 +13347,7 @@ async fn main() -> Result<()> {
                                         .ok()
                                         .unwrap_or(900_000),
                                     );
-                                    let entry = pause_until_by_condition
+                                    let entry = entry_pause_until_by_condition
                                         .entry(condition_id.to_string())
                                         .or_insert(0);
                                     if pause_until > *entry {
@@ -13355,13 +13391,23 @@ async fn main() -> Result<()> {
                         ws_matched_by_order_id
                             .retain(|order_id, _| active_order_ids.contains(order_id));
                         for condition_id in paused_conditions {
-                            let _ = trader_for_mm_sport
-                                .cancel_pending_orders_for_strategy_condition(
+                            if let Ok(rows) = tracking_db_for_mm_sport
+                                .list_open_pending_orders_for_strategy_condition(
                                     STRATEGY_ID_MM_SPORT_V1,
                                     condition_id.as_str(),
-                                    "mm_sport_fill_pause_ws",
+                                )
+                            {
+                                let buy_rows = rows
+                                    .into_iter()
+                                    .filter(|row| row.side.eq_ignore_ascii_case("BUY"))
+                                    .collect::<Vec<_>>();
+                                let _ = mm_sport_cancel_pending_rows(
+                                    &api_for_mm_sport,
+                                    &tracking_db_for_mm_sport,
+                                    buy_rows.as_slice(),
                                 )
                                 .await;
+                            }
                         }
                     }
 
@@ -13408,15 +13454,8 @@ async fn main() -> Result<()> {
                             {
                                 continue;
                             }
-                            let game_start_ts_ms = details
-                                .game_start_time
-                                .as_deref()
-                                .and_then(parse_rfc3339_to_ts_ms)
-                                .or_else(|| parse_rfc3339_to_ts_ms(details.end_date_iso.as_str()))
-                                .unwrap_or(0);
-                            if !mm_sport_prestart_exit_mode(now_ms, game_start_ts_ms) {
-                                continue;
-                            }
+                            let game_start_ts_ms =
+                                mm_sport_game_start_ts_ms_from_clob(&details).unwrap_or(0);
                             let (up_token_id, down_token_id) =
                                 match mm_sport_extract_binary_token_ids(&details.tokens) {
                                     Some(value) => value,
@@ -13465,6 +13504,223 @@ async fn main() -> Result<()> {
                         );
                     }
 
+                    let mut known_tick_size_by_condition: std::collections::HashMap<String, f64> =
+                        std::collections::HashMap::new();
+                    for market in &discovered_markets {
+                        known_tick_size_by_condition
+                            .insert(market.condition_id.clone(), market.minimum_tick_size);
+                    }
+                    for (condition_id, market) in &fallback_exit_markets_by_condition {
+                        known_tick_size_by_condition
+                            .entry(condition_id.clone())
+                            .or_insert(market.minimum_tick_size);
+                    }
+
+                    // Event-driven share-ratio watchdog for currently quoted markets.
+                    // This runs before quote planning so we can immediately cancel/pause
+                    // conditions that drift above share cap (or go one-sided/shallow).
+                    for (condition_id, rows) in &open_orders_by_condition {
+                        let buy_rows = rows
+                            .iter()
+                            .filter(|row| row.side.eq_ignore_ascii_case("BUY"))
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        if buy_rows.is_empty() {
+                            continue;
+                        }
+                        let mut buy_rows_by_token: std::collections::HashMap<
+                            String,
+                            Vec<PendingOrderRecord>,
+                        > = std::collections::HashMap::new();
+                        for row in buy_rows {
+                            buy_rows_by_token
+                                .entry(row.token_id.clone())
+                                .or_default()
+                                .push(row);
+                        }
+                        if buy_rows_by_token.len() != 2 {
+                            let ratio_pause_until = now_ms.saturating_add(
+                                i64::try_from(
+                                    mm_sport_cfg_for_loop
+                                        .ratio_breach_pause_sec
+                                        .saturating_mul(1_000),
+                                )
+                                .ok()
+                                .unwrap_or(900_000),
+                            );
+                            let pause_entry = ratio_pause_until_by_condition
+                                .entry(condition_id.clone())
+                                .or_insert(0);
+                            if ratio_pause_until > *pause_entry {
+                                *pause_entry = ratio_pause_until;
+                            }
+                            let can_cancel_on_ratio = last_ratio_cancel_ms_by_condition
+                                .get(condition_id)
+                                .map(|last| {
+                                    now_ms.saturating_sub(*last)
+                                        >= mm_sport_cfg_for_loop.ratio_breach_cancel_cooldown_ms
+                                })
+                                .unwrap_or(true);
+                            if can_cancel_on_ratio && !rows.is_empty() {
+                                let _ = mm_sport_cancel_pending_rows(
+                                    &api_for_mm_sport,
+                                    &tracking_db_for_mm_sport,
+                                    rows.as_slice(),
+                                )
+                                .await;
+                                last_ratio_cancel_ms_by_condition
+                                    .insert(condition_id.clone(), now_ms);
+                            }
+                            log_event(
+                                "mm_sport_watchdog_pair_paused",
+                                json!({
+                                    "strategy_id": STRATEGY_ID_MM_SPORT_V1,
+                                    "condition_id": condition_id,
+                                    "reason": "one_sided",
+                                    "buy_side_count": buy_rows_by_token.len(),
+                                    "ratio_pause_until_ms": ratio_pause_until,
+                                    "ratio_cancel_cooldown_ms": mm_sport_cfg_for_loop.ratio_breach_cancel_cooldown_ms,
+                                    "ratio_cancel_executed": can_cancel_on_ratio
+                                }),
+                            );
+                            continue;
+                        }
+
+                        let tick_size = known_tick_size_by_condition
+                            .get(condition_id)
+                            .copied()
+                            .filter(|value| value.is_finite() && *value > 0.0)
+                            .unwrap_or(0.01);
+                        let ratio_limit = mm_sport_cfg_for_loop.max_share_ratio.clamp(0.01, 0.99);
+                        let mut pair_min_top_depth_usd = f64::INFINITY;
+                        let mut ratio_breached = false;
+                        let mut token_details = Vec::new();
+                        let mut incomplete_books = false;
+                        for (token_id, token_buy_rows) in &buy_rows_by_token {
+                            let ws_book = if mm_sport_cfg_for_loop.event_driven_enable
+                                && api_for_mm_sport.ws_enabled()
+                            {
+                                polymarket_ws_for_mm_sport
+                                    .get_orderbook(
+                                        token_id.as_str(),
+                                        mm_sport_cfg_for_loop.ws_stale_ms,
+                                    )
+                                    .await
+                            } else {
+                                None
+                            };
+                            let book = if let Some(book) = ws_book {
+                                Some(book)
+                            } else {
+                                api_for_mm_sport.get_orderbook(token_id.as_str()).await.ok()
+                            };
+                            let Some(book) = book else {
+                                incomplete_books = true;
+                                break;
+                            };
+                            let (best_bid, best_ask, best_bid_size, _best_ask_size) =
+                                best_bid_ask_sizes_from_orderbook(&book);
+                            let (Some(best_bid), Some(best_ask)) = (best_bid, best_ask) else {
+                                incomplete_books = true;
+                                break;
+                            };
+                            if !best_bid.is_finite()
+                                || !best_ask.is_finite()
+                                || best_bid <= 0.0
+                                || best_ask <= best_bid
+                            {
+                                incomplete_books = true;
+                                break;
+                            }
+
+                            let own_top_bid_shares = token_buy_rows
+                                .iter()
+                                .filter(|row| mm_sport_price_close(row.price, best_bid, tick_size))
+                                .filter_map(mm_sport_size_shares_from_pending)
+                                .sum::<f64>();
+                            let (ext_top_bid_shares, ext_top_bid_usd) =
+                                mm_sport_external_top_bid_depth(
+                                    token_buy_rows.as_slice(),
+                                    best_bid,
+                                    best_bid_size,
+                                    tick_size,
+                                );
+                            pair_min_top_depth_usd = pair_min_top_depth_usd.min(ext_top_bid_usd);
+                            let observed_ratio =
+                                mm_sport_target_share_ratio(own_top_bid_shares, ext_top_bid_shares);
+                            if observed_ratio
+                                .map(|ratio| ratio > ratio_limit + 1e-9)
+                                .unwrap_or(true)
+                            {
+                                ratio_breached = true;
+                            }
+                            token_details.push(json!({
+                                "token_id": token_id,
+                                "best_bid": best_bid,
+                                "ext_top_bid_shares": ext_top_bid_shares,
+                                "ext_top_bid_usd": ext_top_bid_usd,
+                                "own_top_bid_shares": own_top_bid_shares,
+                                "observed_ratio": observed_ratio
+                            }));
+                        }
+                        if incomplete_books {
+                            continue;
+                        }
+                        let depth_breached = !pair_min_top_depth_usd.is_finite()
+                            || pair_min_top_depth_usd < MM_SPORT_LOW_DEPTH_FLOOR_USD;
+                        if !depth_breached && !ratio_breached {
+                            continue;
+                        }
+
+                        let ratio_pause_until = now_ms.saturating_add(
+                            i64::try_from(
+                                mm_sport_cfg_for_loop
+                                    .ratio_breach_pause_sec
+                                    .saturating_mul(1_000),
+                            )
+                            .ok()
+                            .unwrap_or(900_000),
+                        );
+                        let pause_entry = ratio_pause_until_by_condition
+                            .entry(condition_id.clone())
+                            .or_insert(0);
+                        if ratio_pause_until > *pause_entry {
+                            *pause_entry = ratio_pause_until;
+                        }
+                        let can_cancel_on_ratio = last_ratio_cancel_ms_by_condition
+                            .get(condition_id)
+                            .map(|last| {
+                                now_ms.saturating_sub(*last)
+                                    >= mm_sport_cfg_for_loop.ratio_breach_cancel_cooldown_ms
+                            })
+                            .unwrap_or(true);
+                        if can_cancel_on_ratio && !rows.is_empty() {
+                            let _ = mm_sport_cancel_pending_rows(
+                                &api_for_mm_sport,
+                                &tracking_db_for_mm_sport,
+                                rows.as_slice(),
+                            )
+                            .await;
+                            last_ratio_cancel_ms_by_condition.insert(condition_id.clone(), now_ms);
+                        }
+                        log_event(
+                            "mm_sport_watchdog_pair_paused",
+                            json!({
+                                "strategy_id": STRATEGY_ID_MM_SPORT_V1,
+                                "condition_id": condition_id,
+                                "reason": if depth_breached { "depth" } else { "ratio" },
+                                "pair_min_top_depth_usd": pair_min_top_depth_usd,
+                                "pair_depth_floor_usd": MM_SPORT_LOW_DEPTH_FLOOR_USD,
+                                "max_share_ratio": ratio_limit,
+                                "ratio_breached": ratio_breached,
+                                "ratio_pause_until_ms": ratio_pause_until,
+                                "ratio_cancel_cooldown_ms": mm_sport_cfg_for_loop.ratio_breach_cancel_cooldown_ms,
+                                "ratio_cancel_executed": can_cancel_on_ratio,
+                                "token_details": token_details
+                            }),
+                        );
+                    }
+
                     let mut active_markets = discovered_markets.clone();
                     let mut active_condition_ids = active_markets
                         .iter()
@@ -13475,6 +13731,51 @@ async fn main() -> Result<()> {
                             active_markets.push(market.clone());
                         }
                     }
+                    let mut refreshed_scope_token_ids: std::collections::HashSet<String> =
+                        std::collections::HashSet::new();
+                    let mut refreshed_scope_condition_ids: std::collections::HashSet<String> =
+                        std::collections::HashSet::new();
+                    for market in &active_markets {
+                        if !market.up_token_id.trim().is_empty() {
+                            refreshed_scope_token_ids.insert(market.up_token_id.trim().to_string());
+                        }
+                        if !market.down_token_id.trim().is_empty() {
+                            refreshed_scope_token_ids
+                                .insert(market.down_token_id.trim().to_string());
+                        }
+                        if !market.condition_id.trim().is_empty() {
+                            refreshed_scope_condition_ids
+                                .insert(market.condition_id.trim().to_string());
+                        }
+                    }
+                    for (condition_id, rows) in &open_orders_by_condition {
+                        if !condition_id.trim().is_empty() {
+                            refreshed_scope_condition_ids.insert(condition_id.trim().to_string());
+                        }
+                        for row in rows {
+                            if !row.token_id.trim().is_empty() {
+                                refreshed_scope_token_ids.insert(row.token_id.trim().to_string());
+                            }
+                        }
+                    }
+                    let mut refreshed_scope_tokens =
+                        refreshed_scope_token_ids.into_iter().collect::<Vec<_>>();
+                    refreshed_scope_tokens.sort();
+                    let mut refreshed_scope_conditions = refreshed_scope_condition_ids
+                        .into_iter()
+                        .collect::<Vec<_>>();
+                    refreshed_scope_conditions.sort();
+                    if refreshed_scope_tokens != wait_scope_token_ids
+                        || refreshed_scope_conditions != wait_scope_condition_ids
+                    {
+                        wait_scope_token_ids = refreshed_scope_tokens;
+                        wait_scope_condition_ids = refreshed_scope_conditions;
+                        polymarket_ws_for_mm_sport.set_subscription_scope_targets(
+                            STRATEGY_ID_MM_SPORT_V1,
+                            wait_scope_token_ids.as_slice(),
+                            wait_scope_condition_ids.as_slice(),
+                        );
+                    }
 
                     for market in &active_markets {
                         let prestart_exit_mode =
@@ -13482,7 +13783,11 @@ async fn main() -> Result<()> {
                         let condition_has_inventory =
                             inventory_condition_ids.contains(market.condition_id.as_str());
                         let inventory_exit_mode = prestart_exit_mode || condition_has_inventory;
-                        if mm_sport_cfg_for_loop.pregame_only && market.game_start_ts_ms <= now_ms {
+                        if mm_sport_cfg_for_loop.pregame_only
+                            && market.game_start_ts_ms > 0
+                            && market.game_start_ts_ms <= now_ms
+                            && !inventory_exit_mode
+                        {
                             if let Some(rows) = open_orders_by_condition.get(&market.condition_id) {
                                 let _ = mm_sport_cancel_pending_rows(
                                     &api_for_mm_sport,
@@ -13494,11 +13799,16 @@ async fn main() -> Result<()> {
                             continue;
                         }
 
-                        let pause_until = pause_until_by_condition
+                        let entry_pause_until = entry_pause_until_by_condition
                             .get(&market.condition_id)
                             .copied()
                             .unwrap_or(0);
-                        if pause_until > now_ms && !prestart_exit_mode {
+                        let ratio_pause_until = ratio_pause_until_by_condition
+                            .get(&market.condition_id)
+                            .copied()
+                            .unwrap_or(0);
+                        let quote_pause_until = entry_pause_until.max(ratio_pause_until);
+                        if quote_pause_until > now_ms && !inventory_exit_mode {
                             if let Some(rows) = open_orders_by_condition.get(&market.condition_id) {
                                 let _ = mm_sport_cancel_pending_rows(
                                     &api_for_mm_sport,
@@ -13702,21 +14012,37 @@ async fn main() -> Result<()> {
                                     .map(|ratio| ratio <= ratio_limit + 1e-9)
                                     .unwrap_or(false);
                             if !pair_ratio_ok {
-                                let ratio_pause_until =
-                                    now_ms.saturating_add(MM_SPORT_RATIO_BREACH_PAUSE_MS);
-                                let pause_entry = pause_until_by_condition
+                                let ratio_pause_until = now_ms.saturating_add(
+                                    i64::try_from(
+                                        mm_sport_cfg_for_loop
+                                            .ratio_breach_pause_sec
+                                            .saturating_mul(1_000),
+                                    )
+                                    .ok()
+                                    .unwrap_or(900_000),
+                                );
+                                let pause_entry = ratio_pause_until_by_condition
                                     .entry(market.condition_id.clone())
                                     .or_insert(0);
                                 if ratio_pause_until > *pause_entry {
                                     *pause_entry = ratio_pause_until;
                                 }
-                                if !market_rows.is_empty() {
+                                let can_cancel_on_ratio = last_ratio_cancel_ms_by_condition
+                                    .get(&market.condition_id)
+                                    .map(|last| {
+                                        now_ms.saturating_sub(*last)
+                                            >= mm_sport_cfg_for_loop.ratio_breach_cancel_cooldown_ms
+                                    })
+                                    .unwrap_or(true);
+                                if can_cancel_on_ratio && !market_rows.is_empty() {
                                     let _ = mm_sport_cancel_pending_rows(
                                         &api_for_mm_sport,
                                         &tracking_db_for_mm_sport,
                                         market_rows.as_slice(),
                                     )
                                     .await;
+                                    last_ratio_cancel_ms_by_condition
+                                        .insert(market.condition_id.clone(), now_ms);
                                 }
                                 log_event(
                                     "mm_sport_skip_pair_ratio_limit_exceeded",
@@ -13729,7 +14055,9 @@ async fn main() -> Result<()> {
                                         "down_ext_top_bid_shares": down_ext_top_bid_shares,
                                         "up_ratio": up_ratio,
                                         "down_ratio": down_ratio,
-                                        "ratio_pause_until_ms": ratio_pause_until
+                                        "ratio_pause_until_ms": ratio_pause_until,
+                                        "ratio_cancel_cooldown_ms": mm_sport_cfg_for_loop.ratio_breach_cancel_cooldown_ms,
+                                        "ratio_cancel_executed": can_cancel_on_ratio
                                     }),
                                 );
                                 continue;
@@ -14135,21 +14463,37 @@ async fn main() -> Result<()> {
                                 continue;
                             };
                             if observed_ratio > ratio_limit + 1e-9 {
-                                let ratio_pause_until =
-                                    now_ms_local.saturating_add(MM_SPORT_RATIO_BREACH_PAUSE_MS);
-                                let pause_entry = pause_until_by_condition
+                                let ratio_pause_until = now_ms_local.saturating_add(
+                                    i64::try_from(
+                                        mm_sport_cfg_for_loop
+                                            .ratio_breach_pause_sec
+                                            .saturating_mul(1_000),
+                                    )
+                                    .ok()
+                                    .unwrap_or(900_000),
+                                );
+                                let pause_entry = ratio_pause_until_by_condition
                                     .entry(market.condition_id.clone())
                                     .or_insert(0);
                                 if ratio_pause_until > *pause_entry {
                                     *pause_entry = ratio_pause_until;
                                 }
-                                if !market_rows.is_empty() {
+                                let can_cancel_on_ratio = last_ratio_cancel_ms_by_condition
+                                    .get(&market.condition_id)
+                                    .map(|last| {
+                                        now_ms_local.saturating_sub(*last)
+                                            >= mm_sport_cfg_for_loop.ratio_breach_cancel_cooldown_ms
+                                    })
+                                    .unwrap_or(true);
+                                if can_cancel_on_ratio && !market_rows.is_empty() {
                                     let _ = mm_sport_cancel_pending_rows(
                                         &api_for_mm_sport,
                                         &tracking_db_for_mm_sport,
                                         market_rows.as_slice(),
                                     )
                                     .await;
+                                    last_ratio_cancel_ms_by_condition
+                                        .insert(market.condition_id.clone(), now_ms_local);
                                 }
                                 log_event(
                                     "mm_sport_skip_pair_ratio_limit_exceeded_runtime",
@@ -14161,7 +14505,9 @@ async fn main() -> Result<()> {
                                         "ext_top_bid_shares": ext_top_bid_shares,
                                         "observed_ratio": observed_ratio,
                                         "max_share_ratio": ratio_limit,
-                                        "ratio_pause_until_ms": ratio_pause_until
+                                        "ratio_pause_until_ms": ratio_pause_until,
+                                        "ratio_cancel_cooldown_ms": mm_sport_cfg_for_loop.ratio_breach_cancel_cooldown_ms,
+                                        "ratio_cancel_executed": can_cancel_on_ratio
                                     }),
                                 );
                                 abort_market_after_pair_cancel = true;
@@ -14326,7 +14672,8 @@ async fn main() -> Result<()> {
                             json!({
                                 "strategy_id": STRATEGY_ID_MM_SPORT_V1,
                                 "discovered_markets": discovered_markets.len(),
-                                "paused_markets": pause_until_by_condition.len(),
+                                "entry_paused_markets": entry_pause_until_by_condition.len(),
+                                "ratio_paused_markets": ratio_pause_until_by_condition.len(),
                                 "inventory_tokens": inventory_by_token.len(),
                             }),
                         );

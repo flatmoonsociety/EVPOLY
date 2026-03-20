@@ -701,6 +701,8 @@ fn market_from_details(details: &MarketDetails) -> Market {
         end_date: (!end_iso.is_empty()).then_some(end_iso.to_string()),
         end_date_iso: (!end_iso.is_empty()).then_some(end_iso.to_string()),
         end_date_iso_alt: (!end_iso.is_empty()).then_some(end_iso.to_string()),
+        game_start_time: details.game_start_time.clone(),
+        start_date: None,
         active: details.active,
         closed: details.closed,
         tokens: Some(

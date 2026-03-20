@@ -19,6 +19,10 @@ pub struct Market {
     pub end_date_iso: Option<String>,
     #[serde(rename = "endDateIso")]
     pub end_date_iso_alt: Option<String>,
+    #[serde(rename = "gameStartTime")]
+    pub game_start_time: Option<String>,
+    #[serde(rename = "startDate")]
+    pub start_date: Option<String>,
     pub active: bool,
     pub closed: bool,
     pub tokens: Option<Vec<Token>>,

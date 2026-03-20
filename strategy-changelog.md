@@ -75,6 +75,35 @@ Older entries may reference env keys that were removed in later commits.
 
 ## Change Log
 
+### 2026-03-20
+
+- `mm_sport_v1` pause semantics were split into entry-fill pause and ratio-breach pause (`src/main.rs`, `src/mm/mod.rs`, `.env.example`, `.env.full.example`):
+  - pause-on-fill now arms only for inventory-increasing BUY entry fills (DB event path + WS matched-size path).
+  - SELL/unwind fills no longer re-arm pause, so inventory exit is not interrupted by the same pause machine.
+  - added configurable ratio-breach controls:
+    - `EVPOLY_MM_SPORT_RATIO_BREACH_PAUSE_SEC` (default `900`)
+    - `EVPOLY_MM_SPORT_RATIO_BREACH_CANCEL_COOLDOWN_MS` (default `2000`)
+  - MM Sport loop defaults were tightened for faster event reaction:
+    - `EVPOLY_MM_SPORT_POLL_MS` default `250`
+    - `EVPOLY_MM_SPORT_EVENT_FALLBACK_POLL_MS` default `200`
+
+- `mm_sport_v1` game-start handling and inventory-exit market retention were corrected (`src/main.rs`, `src/models.rs`):
+  - pregame timers now use real match-start fields (`gameStartTime` / `startDate`) and no longer fall back to market end timestamps.
+  - discovery now emits explicit missing-start filtering telemetry (`skipped_missing_start_time`) when pregame-only is enabled.
+  - fallback inventory-market refresh keeps inventory-bearing conditions active until flat (not only inside prestart window).
+  - pregame stop gate now allows inventory-exit flow to continue for inventory-bearing conditions.
+
+- `mm_sport_v1` now has a dedicated per-cycle ratio/depth watchdog for currently quoted markets (`src/main.rs`):
+  - checks active MM Sport BUY conditions (including one-sided drift) every loop.
+  - uses WS orderbook first, then token-scoped polling fallback.
+  - on breach (ratio/depth/one-sided), cancels the full condition pair, sets ratio pause, and waits for cooldown before next cancel.
+  - WS subscription scope now refreshes from active markets plus active MM Sport orders so event-driven checks stay scoped to live exposure.
+
+- Pending-order reconciliation hardening for MM strategies (`src/tracking_db.rs`):
+  - `update_pending_order_status` and `update_pending_order_status_batch_any` no longer downgrade `FILLED` rows to non-filled terminal states.
+  - missing-entry-fill backfill now also considers rows with non-null `filled_at_ms` even if status changed from `FILLED`.
+  - affects `mm_sport_v1`/`mm_rewards_v1` runtime safety against stale cancel-vs-fill races.
+
 ### 2026-03-19
 
 - `mm_sport_v1` discovery loop was hardened against CLOB rate-limit starvation (`src/main.rs`):

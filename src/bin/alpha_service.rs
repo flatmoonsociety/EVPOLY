@@ -1922,6 +1922,8 @@ fn mm_selection_candidate_to_auto_candidate(
             end_date: None,
             end_date_iso: None,
             end_date_iso_alt: None,
+            game_start_time: None,
+            start_date: None,
             active: true,
             closed: false,
             tokens: None,

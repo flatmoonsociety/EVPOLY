@@ -10710,14 +10710,22 @@ ON CONFLICT(order_id) DO UPDATE SET
             conn.execute(
                 r#"
 UPDATE pending_orders
-SET status=?2,
+SET status=CASE
+        WHEN status='FILLED' AND ?2!='FILLED' THEN status
+        ELSE ?2
+    END,
     filled_at_ms=CASE
-        WHEN ?2='FILLED' THEN COALESCE(filled_at_ms, ?3)
+        WHEN status='FILLED' OR ?2='FILLED' THEN COALESCE(filled_at_ms, ?3)
         ELSE filled_at_ms
     END,
     updated_at_ms=?3
 WHERE order_id=?1
-  AND status != ?2
+  AND (
+      CASE
+          WHEN status='FILLED' AND ?2!='FILLED' THEN status
+          ELSE ?2
+      END
+  ) != status
 "#,
                 params![order_id, normalized_status, now_ms],
             )?;
@@ -11172,7 +11180,7 @@ FROM pending_orders p
 LEFT JOIN trade_events e
   ON e.event_key = ('entry_fill_order:' || p.order_id)
 WHERE p.side='BUY'
-  AND p.status='FILLED'
+  AND (p.status='FILLED' OR p.filled_at_ms IS NOT NULL)
   AND COALESCE(p.filled_at_ms, p.updated_at_ms) >= ?1
   AND p.strategy_id != 'legacy_default'
   AND UPPER(TRIM(COALESCE(p.entry_mode, 'LEGACY'))) != 'RESTORED'
@@ -11681,14 +11689,22 @@ WHERE order_id=?3
                 let tx = conn.transaction()?;
                 let query = r#"
 UPDATE pending_orders
-SET status=?1,
+SET status=CASE
+        WHEN status='FILLED' AND ?1!='FILLED' THEN status
+        ELSE ?1
+    END,
     updated_at_ms=?2,
     filled_at_ms=CASE
-        WHEN ?1='FILLED' AND filled_at_ms IS NULL THEN ?2
+        WHEN status='FILLED' OR (?1='FILLED' AND filled_at_ms IS NULL) THEN COALESCE(filled_at_ms, ?2)
         ELSE filled_at_ms
     END
 WHERE order_id=?3
-  AND status != ?1
+  AND (
+      CASE
+          WHEN status='FILLED' AND ?1!='FILLED' THEN status
+          ELSE ?1
+      END
+  ) != status
 "#;
                 let mut stmt = tx.prepare(query)?;
                 let now_ms = chrono::Utc::now().timestamp_millis();

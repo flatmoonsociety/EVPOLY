@@ -601,6 +601,8 @@ async fn get_or_discover_markets(
                 end_date: None,
                 end_date_iso: None,
                 end_date_iso_alt: None,
+                game_start_time: None,
+                start_date: None,
                 tokens: None,
                 clob_token_ids: None,
                 outcomes: None,

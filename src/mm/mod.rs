@@ -286,6 +286,8 @@ pub struct MmSportConfig {
     pub max_share_ratio: f64,
     pub min_top_depth_usd: f64,
     pub pause_after_fill_sec: u64,
+    pub ratio_breach_pause_sec: u64,
+    pub ratio_breach_cancel_cooldown_ms: i64,
     pub reprice_min_interval_ms: i64,
     pub size_requote_delta_pct: f64,
     pub allowance_refresh_sec: u64,
@@ -307,10 +309,10 @@ impl MmSportConfig {
         Self {
             enable: env_bool("EVPOLY_STRATEGY_MM_SPORT_ENABLE", false),
             hard_disable: env_bool("EVPOLY_MM_SPORT_HARD_DISABLE", false),
-            poll_ms: env_u64("EVPOLY_MM_SPORT_POLL_MS", 1_000).clamp(200, 30_000),
+            poll_ms: env_u64("EVPOLY_MM_SPORT_POLL_MS", 250).clamp(50, 30_000),
             event_driven_enable: env_bool("EVPOLY_MM_SPORT_EVENT_DRIVEN_ENABLE", true),
-            event_fallback_poll_ms: env_u64("EVPOLY_MM_SPORT_EVENT_FALLBACK_POLL_MS", 1_000)
-                .clamp(100, 30_000),
+            event_fallback_poll_ms: env_u64("EVPOLY_MM_SPORT_EVENT_FALLBACK_POLL_MS", 200)
+                .clamp(50, 30_000),
             ws_stale_ms: env_u64("EVPOLY_MM_SPORT_WS_STALE_MS", 2_500).clamp(250, 30_000) as i64,
             discovery_refresh_sec: 300,
             rewards_page_budget: env_u32("EVPOLY_MM_SPORT_REWARDS_PAGE_BUDGET", 8).clamp(1, 200),
@@ -321,6 +323,13 @@ impl MmSportConfig {
             min_top_depth_usd: env_f64("EVPOLY_MM_SPORT_MIN_TOP_DEPTH_USD", 100_000.0).max(0.0),
             pause_after_fill_sec: env_u64("EVPOLY_MM_SPORT_PAUSE_AFTER_FILL_SEC", 7_200)
                 .clamp(60, 86_400),
+            ratio_breach_pause_sec: env_u64("EVPOLY_MM_SPORT_RATIO_BREACH_PAUSE_SEC", 900)
+                .clamp(60, 86_400),
+            ratio_breach_cancel_cooldown_ms: env_u64(
+                "EVPOLY_MM_SPORT_RATIO_BREACH_CANCEL_COOLDOWN_MS",
+                2_000,
+            )
+            .clamp(50, 60_000) as i64,
             reprice_min_interval_ms: env_u64("EVPOLY_MM_SPORT_REPRICE_MIN_INTERVAL_MS", 600)
                 .clamp(50, 60_000) as i64,
             size_requote_delta_pct: env_f64("EVPOLY_MM_SPORT_SIZE_REQUOTE_DELTA_PCT", 0.03)

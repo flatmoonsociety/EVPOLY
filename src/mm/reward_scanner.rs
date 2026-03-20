@@ -892,6 +892,8 @@ fn market_from_details(details: &MarketDetails) -> Market {
         end_date: None,
         end_date_iso: Some(details.end_date_iso.clone()),
         end_date_iso_alt: None,
+        game_start_time: details.game_start_time.clone(),
+        start_date: None,
         active: details.active,
         closed: details.closed,
         tokens,
