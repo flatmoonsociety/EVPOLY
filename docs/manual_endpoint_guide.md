@@ -43,8 +43,9 @@ Request headers:
 - `/manual/open` is BUY flow.
 - `/manual/close` is reduce-only SELL flow (must not create new buy exposure).
 - `/manual/close` default price behavior when `price` is omitted:
-  - `limit`/`chase_limit` use current best ask.
-  - if no best quote/orderbook is available, the request fails (no silent `0.999` fallback).
+  - `limit` uses current best ask.
+  - if no best quote/orderbook is available for `limit`, the request fails (no silent `0.999` fallback).
+  - `chase_limit` behavior is unchanged.
 - `tp_price` is allowed only for `/manual/open`.
 - `tp_price` on `/manual/close` is rejected (`400`).
 

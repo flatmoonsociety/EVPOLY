@@ -851,7 +851,14 @@ fn manual_price_from_quote(
                 best_ask.or(best_bid)
             }
         }
-        (ManualOrderAction::Close, ManualOrderMode::ChaseLimit) => best_ask.or(best_bid),
+        (ManualOrderAction::Close, ManualOrderMode::ChaseLimit) => {
+            if post_only {
+                best_ask
+                    .or(best_bid.map(|bid| (bid + tick_size.max(0.000_001)).min(MANUAL_MAX_PRICE)))
+            } else {
+                best_bid.or(best_ask)
+            }
+        }
         (ManualOrderAction::Open, ManualOrderMode::Limit) => {
             if post_only {
                 best_bid.or(best_ask)
@@ -1579,9 +1586,18 @@ async fn start_manual_order(
             .filter(|v| v.is_finite() && *v > 0.0)
             .unwrap_or(max_price)
             .clamp(min_price, max_price),
-        None => anyhow::bail!(
-            "unable to derive /manual/close price from best ask; provide explicit price or wait for quote/orderbook"
-        ),
+        None if matches!(action, ManualOrderAction::Close)
+            && matches!(mode, ManualOrderMode::Limit) =>
+        {
+            anyhow::bail!(
+                "unable to derive /manual/close limit price from best ask; provide explicit price or wait for quote/orderbook"
+            )
+        }
+        None => request
+            .price
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .unwrap_or(max_price)
+            .clamp(min_price, max_price),
     };
 
     let (initial_balance_shares, balance_tracking_warning) =
