@@ -2472,6 +2472,11 @@ async fn handle_admin_api_connection(
             .await
         }
         ("POST", "/admin/mm/reconcile/inventory") => {
+            let strategy_id = query_params
+                .get("strategy_id")
+                .map(|v| v.trim())
+                .filter(|v| !v.is_empty())
+                .unwrap_or(STRATEGY_ID_MM_REWARDS_V1);
             let min_drift_shares = query_params
                 .get("min_drift_shares")
                 .and_then(|v| v.trim().parse::<f64>().ok())
@@ -2480,12 +2485,17 @@ async fn handle_admin_api_connection(
                 .get("limit")
                 .and_then(|v| v.trim().parse::<usize>().ok())
                 .filter(|v| *v > 0);
-            match trader.reconcile_mm_inventory_from_wallet_tables(min_drift_shares, limit) {
+            match trader.reconcile_strategy_inventory_from_wallet_tables(
+                strategy_id,
+                min_drift_shares,
+                limit,
+            ) {
                 Ok(result) => write_http_json_response(&mut stream, 200, "OK", &result).await,
                 Err(e) => {
                     log_event(
                         "admin_mm_inventory_reconcile_failed",
                         json!({
+                            "strategy_id": strategy_id,
                             "error": e.to_string(),
                             "min_drift_shares": min_drift_shares,
                             "limit": limit

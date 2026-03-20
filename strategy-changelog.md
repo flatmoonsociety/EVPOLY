@@ -77,6 +77,11 @@ Older entries may reference env keys that were removed in later commits.
 
 ### 2026-03-20
 
+- MM inventory drift reconcile now supports both `mm_rewards_v1` and `mm_sport_v1` via admin + wallet-sync path (`src/trader.rs`, `src/main.rs`, `scripts/wallet_history_sync.py`):
+  - admin endpoint `POST /admin/mm/reconcile/inventory` now accepts `strategy_id` (`mm_rewards_v1` default; `mm_sport_v1` supported) and reconciles per strategy against `wallet_positions_live_latest_v1`.
+  - wallet sync worker now calls reconcile for both MM strategies each run and aggregates repaired shares/status so strategy inventory attribution is repaired from live wallet snapshots.
+  - affects MM inventory tracking/repair across all MM rewards and MM sport markets (all symbols/timeframes where those strategies hold inventory).
+
 - `mm_sport_v1` now applies a simple WS bust-flow pause and randomized quote expiry cycle for pregame sports markets (`src/main.rs`, `src/mm/mod.rs`, `src/polymarket_ws.rs`, `.env.example`, `.env.full.example`):
   - market WS bridge now consumes public `last_trade_price` events and keeps a short per-token market-trade window used by MM Sport bust checks.
   - MM Sport bust trigger is now explicit (`bust_shares_1s >= 10000` by default over a `1s` window): if triggered at/under bid guard price, bot cancels MM Sport condition quotes and pauses quoting for a random `60s..300s`, then resumes normal ratio/depth re-evaluation.
