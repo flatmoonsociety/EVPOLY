@@ -13260,6 +13260,7 @@ async fn main() -> Result<()> {
                     String,
                     i64,
                 > = std::collections::HashMap::new();
+                let mut last_reconcile_failed_rearm_ms = 0_i64;
 
                 loop {
                     let loop_now_ms = chrono::Utc::now().timestamp_millis();
@@ -13327,6 +13328,38 @@ async fn main() -> Result<()> {
                     }
 
                     let now_ms = chrono::Utc::now().timestamp_millis();
+                    if now_ms.saturating_sub(last_reconcile_failed_rearm_ms) >= 60_000 {
+                        last_reconcile_failed_rearm_ms = now_ms;
+                        if let Ok(rows) = tracking_db_for_mm_sport
+                            .list_reconcile_pending_orders_retry(128, 300_000, 172_800)
+                        {
+                            let mut rearmed = 0_u64;
+                            for row in rows {
+                                if !row
+                                    .strategy_id
+                                    .eq_ignore_ascii_case(STRATEGY_ID_MM_SPORT_V1)
+                                    || !row.status.eq_ignore_ascii_case("RECONCILE_FAILED")
+                                {
+                                    continue;
+                                }
+                                if tracking_db_for_mm_sport
+                                    .update_pending_order_status(row.order_id.as_str(), "OPEN")
+                                    .is_ok()
+                                {
+                                    rearmed = rearmed.saturating_add(1);
+                                }
+                            }
+                            if rearmed > 0 {
+                                log_event(
+                                    "mm_sport_reconcile_failed_rearmed",
+                                    json!({
+                                        "strategy_id": STRATEGY_ID_MM_SPORT_V1,
+                                        "rearmed_count": rearmed
+                                    }),
+                                );
+                            }
+                        }
+                    }
                     let refresh_interval_ms = i64::try_from(
                         mm_sport_cfg_for_loop
                             .discovery_refresh_sec
