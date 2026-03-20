@@ -279,14 +279,6 @@ pub struct MmSportConfig {
     pub event_driven_enable: bool,
     pub event_fallback_poll_ms: u64,
     pub ws_stale_ms: i64,
-    pub flow_guard_enable: bool,
-    pub flow_trade_window_ms: i64,
-    pub flow_recent_trades_max: usize,
-    pub flow_pause_ms: i64,
-    pub flow_cancel_cooldown_ms: i64,
-    pub flow_sweep_min_ticks: u32,
-    pub flow_big_trade_min_shares: f64,
-    pub flow_big_trade_depth_ratio: f64,
     pub discovery_refresh_sec: u64,
     pub rewards_page_budget: u32,
     pub min_reward_rate_per_day: f64,
@@ -322,23 +314,6 @@ impl MmSportConfig {
             event_fallback_poll_ms: env_u64("EVPOLY_MM_SPORT_EVENT_FALLBACK_POLL_MS", 200)
                 .clamp(50, 30_000),
             ws_stale_ms: env_u64("EVPOLY_MM_SPORT_WS_STALE_MS", 2_500).clamp(250, 30_000) as i64,
-            flow_guard_enable: env_bool("EVPOLY_MM_SPORT_FLOW_GUARD_ENABLE", true),
-            flow_trade_window_ms: env_u64("EVPOLY_MM_SPORT_FLOW_TRADE_WINDOW_MS", 1_200)
-                .clamp(200, 10_000) as i64,
-            flow_recent_trades_max: env_usize("EVPOLY_MM_SPORT_FLOW_RECENT_TRADES_MAX", 24)
-                .clamp(1, 200),
-            flow_pause_ms: env_u64("EVPOLY_MM_SPORT_FLOW_PAUSE_MS", 2_500).clamp(200, 60_000)
-                as i64,
-            flow_cancel_cooldown_ms: env_u64("EVPOLY_MM_SPORT_FLOW_CANCEL_COOLDOWN_MS", 100)
-                .clamp(50, 60_000) as i64,
-            flow_sweep_min_ticks: env_u32("EVPOLY_MM_SPORT_FLOW_SWEEP_MIN_TICKS", 1).clamp(1, 20),
-            flow_big_trade_min_shares: env_f64(
-                "EVPOLY_MM_SPORT_FLOW_BIG_TRADE_MIN_SHARES",
-                2_500.0,
-            )
-            .max(1.0),
-            flow_big_trade_depth_ratio: env_f64("EVPOLY_MM_SPORT_FLOW_BIG_TRADE_DEPTH_RATIO", 0.08)
-                .clamp(0.01, 1.0),
             discovery_refresh_sec: 300,
             rewards_page_budget: env_u32("EVPOLY_MM_SPORT_REWARDS_PAGE_BUDGET", 8).clamp(1, 200),
             min_reward_rate_per_day: env_f64("EVPOLY_MM_SPORT_MIN_REWARD_RATE_PER_DAY", 300.0)
