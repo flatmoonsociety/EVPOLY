@@ -10836,10 +10836,16 @@ impl Trader {
         let mut skipped_candidates = 0_usize;
         let mut failed_orders = 0_usize;
         let mut result_rows: Vec<Value> = Vec::new();
+        let mut reason_counts: HashMap<String, usize> = HashMap::new();
+        let mut bump_reason = |key: &str| {
+            let entry = reason_counts.entry(key.to_string()).or_insert(0);
+            *entry = entry.saturating_add(1);
+        };
 
         for row in candidates {
             if attempted_orders >= max_orders {
                 capped_candidates = capped_candidates.saturating_add(1);
+                bump_reason("capped:max_orders");
                 continue;
             }
 
@@ -10868,6 +10874,7 @@ impl Trader {
             let requested_shares = live_balance_shares.min(row.wallet_shares).max(0.0);
             if requested_shares < min_submit_shares {
                 skipped_candidates = skipped_candidates.saturating_add(1);
+                bump_reason("skipped:insufficient_live_shares");
                 result_rows.push(json!({
                     "status": "skipped",
                     "reason": "insufficient_live_shares",
@@ -10885,6 +10892,7 @@ impl Trader {
                 Ok(v) => v,
                 Err(e) => {
                     skipped_candidates = skipped_candidates.saturating_add(1);
+                    bump_reason("skipped:best_price_unavailable");
                     result_rows.push(json!({
                         "status": "skipped",
                         "reason": "best_price_unavailable",
@@ -10918,6 +10926,7 @@ impl Trader {
                 });
             let Some(reference_price) = reference_price else {
                 skipped_candidates = skipped_candidates.saturating_add(1);
+                bump_reason("skipped:reference_price_unavailable");
                 result_rows.push(json!({
                     "status": "skipped",
                     "reason": "reference_price_unavailable",
@@ -10936,6 +10945,7 @@ impl Trader {
             let submit_shares = Self::floor_units_for_order(requested_shares);
             if submit_shares + 1e-9 < min_submit_shares {
                 skipped_candidates = skipped_candidates.saturating_add(1);
+                bump_reason("skipped:rounded_submit_below_min_submit_shares");
                 result_rows.push(json!({
                     "status": "skipped",
                     "reason": "rounded_submit_below_min_submit_shares",
@@ -10954,6 +10964,7 @@ impl Trader {
             let adjusted_to_minimum = false;
             if submit_notional > max_notional_usd + 1e-9 {
                 skipped_candidates = skipped_candidates.saturating_add(1);
+                bump_reason("skipped:submit_notional_exceeds_dust_cap");
                 result_rows.push(json!({
                     "status": "skipped",
                     "reason": "submit_notional_exceeds_dust_cap",
@@ -10988,6 +10999,7 @@ impl Trader {
             {
                 Ok(resp) => {
                     submitted_orders = submitted_orders.saturating_add(1);
+                    bump_reason("submitted");
                     let submit_event = json!({
                         "condition_id": condition_id,
                         "token_id": token_id,
@@ -11029,6 +11041,7 @@ impl Trader {
                 }
                 Err(e) => {
                     failed_orders = failed_orders.saturating_add(1);
+                    bump_reason("failed:submit_error");
                     let error_text = e.to_string();
                     let fail_event = json!({
                         "condition_id": condition_id,
@@ -11066,6 +11079,38 @@ impl Trader {
             }
         }
 
+        let rows_total = result_rows.len();
+        let rows_sample_limit = 50usize;
+        let rows_sample = result_rows
+            .iter()
+            .take(rows_sample_limit)
+            .cloned()
+            .collect::<Vec<_>>();
+        log_event(
+            "mm_dust_sell_summary",
+            json!({
+                "strategy_id": crate::strategy::STRATEGY_ID_MM_REWARDS_V1,
+                "max_notional_usd": max_notional_usd,
+                "max_shares": max_shares,
+                "scan_limit": scan_limit,
+                "max_orders": max_orders,
+                "min_submit_shares": min_submit_shares,
+                "balance_haircut": balance_haircut,
+                "balance_timeout_ms": balance_timeout_ms,
+                "inter_order_delay_ms": inter_order_delay_ms,
+                "candidates": candidate_count,
+                "candidates_capped": capped_candidates,
+                "attempted_orders": attempted_orders,
+                "submitted": submitted_orders,
+                "failed": failed_orders,
+                "skipped": skipped_candidates,
+                "reason_counts": reason_counts,
+                "rows_total": rows_total,
+                "rows_sample_truncated": rows_total > rows_sample_limit,
+                "rows_sample": rows_sample
+            }),
+        );
+
         Ok(json!({
             "ok": true,
             "enabled": true,
@@ -11084,6 +11129,7 @@ impl Trader {
             "submitted": submitted_orders,
             "failed": failed_orders,
             "skipped": skipped_candidates,
+            "reason_counts": reason_counts,
             "rows": result_rows
         }))
     }
@@ -12170,9 +12216,6 @@ impl Trader {
         let _restore_from_db_requested = Self::redemption_restore_pending_from_db_enabled();
 
         let api_redeemable_positions = self.fetch_api_redeemable_positions_for_sweep().await;
-        if pending_trades.is_empty() && api_redeemable_positions.is_empty() {
-            return Ok(());
-        }
 
         let current_timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -13918,6 +13961,41 @@ impl Trader {
             .await
         {
             warn!("Merge sweep scheduler pass failed: {}", e);
+        }
+
+        // Dust-sell sweep is intentionally piggybacked on the same scheduled redemption slot
+        // (default minute=22, interval=1h) to avoid adding an independent scheduler loop.
+        if sweep_trigger_name == "scheduled_interval" {
+            match self.dust_sell_mm_inventory(None, None, None, None).await {
+                Ok(result) => {
+                    log_event(
+                        "mm_dust_sell_scheduled_completed",
+                        json!({
+                            "trigger": sweep_trigger_name,
+                            "reason": sweep_reason,
+                            "enabled": result.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false),
+                            "candidates": result.get("candidates").and_then(|v| v.as_u64()).unwrap_or(0),
+                            "candidates_capped": result.get("candidates_capped").and_then(|v| v.as_u64()).unwrap_or(0),
+                            "attempted_orders": result.get("attempted_orders").and_then(|v| v.as_u64()).unwrap_or(0),
+                            "submitted": result.get("submitted").and_then(|v| v.as_u64()).unwrap_or(0),
+                            "failed": result.get("failed").and_then(|v| v.as_u64()).unwrap_or(0),
+                            "skipped": result.get("skipped").and_then(|v| v.as_u64()).unwrap_or(0),
+                            "reason_counts": result.get("reason_counts").cloned().unwrap_or_else(|| json!({}))
+                        }),
+                    );
+                }
+                Err(e) => {
+                    warn!("Scheduled dust-sell sweep failed: {}", e);
+                    log_event(
+                        "mm_dust_sell_scheduled_failed",
+                        json!({
+                            "trigger": sweep_trigger_name,
+                            "reason": sweep_reason,
+                            "error": e.to_string()
+                        }),
+                    );
+                }
+            }
         }
 
         Ok(())

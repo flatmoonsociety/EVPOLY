@@ -77,6 +77,15 @@ Older entries may reference env keys that were removed in later commits.
 
 ### 2026-03-20
 
+- `mm_rewards_v1` dust cleanup now runs automatically on the hourly redemption scheduler slot (default minute `22`) with expanded run telemetry (`src/trader.rs`):
+  - dust cleanup is now piggybacked on redemption `scheduled_interval` passes (same hourly slot) instead of being manual-only.
+  - runtime now emits scheduled sweep events:
+    - `mm_dust_sell_scheduled_completed`
+    - `mm_dust_sell_scheduled_failed`
+  - dust cleanup now emits richer per-run summary telemetry:
+    - `mm_dust_sell_summary` includes counts, reason buckets, and sampled row outcomes for robust dust-position auditability.
+  - no new env knobs were introduced for dust scheduling in this change; schedule timing follows existing redemption slot configuration.
+
 - Core startup market discovery is now skipped in MM-only runtime mode (`src/main.rs`, `src/market_discovery.rs`, `src/monitor.rs`):
   - when all core strategies are disabled (`premarket_v1`, `endgame_sweep_v1`, `evcurve_v1`, `sessionband_v1`, `evsnipe_v1`) and at least one MM strategy is enabled (`mm_rewards_v1` and/or `mm_sport_v1`), bot now skips startup BTC/ETH/SOL/XRP discovery and logs `core_discovery_skipped_mm_only`.
   - MM-only mode now initializes monitor markets with explicit fallback placeholders (`dummy_*_fallback`, including BTC) and skips the legacy 15-minute core period-discovery worker.
