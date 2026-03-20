@@ -106,6 +106,11 @@ Older entries may reference env keys that were removed in later commits.
   - missing-entry-fill backfill now also considers rows with non-null `filled_at_ms` even if status changed from `FILLED`.
   - affects `mm_sport_v1`/`mm_rewards_v1` runtime safety against stale cancel-vs-fill races.
 
+- `mm_rewards_v1` entry-cap default was changed to unlimited in the arbiter worker admission path (`src/main.rs`, `.env.full.example`):
+  - `EVPOLY_MAX_MM_REWARDS_ENTRIES_PER_TIMEFRAME_PERIOD` now defaults to no cap (`usize::MAX`) when unset.
+  - Env override remains supported: setting `EVPOLY_MAX_MM_REWARDS_ENTRIES_PER_TIMEFRAME_PERIOD=<integer>` enforces an explicit per-timeframe/period cap.
+  - Affects MM Rewards across all symbols/timeframes (notably `1d` BTC buckets that previously hit default cap `20` and emitted `entry_invariant_blocked`).
+
 ### 2026-03-19
 
 - `mm_sport_v1` discovery loop was hardened against CLOB rate-limit starvation (`src/main.rs`):

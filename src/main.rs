@@ -3470,7 +3470,7 @@ async fn main() -> Result<()> {
         std::env::var("EVPOLY_MAX_MM_REWARDS_ENTRIES_PER_TIMEFRAME_PERIOD")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(20)
+            .unwrap_or(usize::MAX)
             .max(1);
     let enqueue_dedupe_shards = std::env::var("EVPOLY_ENQUEUE_DEDUPE_SHARDS")
         .ok()
