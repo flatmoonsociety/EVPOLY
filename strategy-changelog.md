@@ -77,12 +77,11 @@ Older entries may reference env keys that were removed in later commits.
 
 ### 2026-03-20
 
-- `mm_sport_v1` pause semantics were split into entry-fill pause and ratio-breach pause (`src/main.rs`, `src/mm/mod.rs`, `.env.example`, `.env.full.example`):
+- `mm_sport_v1` pause semantics were split into entry-fill pause and continuous ratio-block mode (`src/main.rs`, `src/mm/mod.rs`, `.env.example`, `.env.full.example`):
   - pause-on-fill now arms only for inventory-increasing BUY entry fills (DB event path + WS matched-size path).
   - SELL/unwind fills no longer re-arm pause, so inventory exit is not interrupted by the same pause machine.
-  - added configurable ratio-breach controls:
-    - `EVPOLY_MM_SPORT_RATIO_BREACH_PAUSE_SEC` (default `900`)
-    - `EVPOLY_MM_SPORT_RATIO_BREACH_CANCEL_COOLDOWN_MS` (default `2000`)
+  - removed timer-based ratio pause (`EVPOLY_MM_SPORT_RATIO_BREACH_PAUSE_SEC` removed).
+  - ratio breaches now enter continuous `ratio_blocked` state with cancel cooldown (`EVPOLY_MM_SPORT_RATIO_BREACH_CANCEL_COOLDOWN_MS`) and hysteresis-based recovery (`0.9 * max_share_ratio`, 2 consecutive healthy checks).
   - MM Sport loop defaults were tightened for faster event reaction:
     - `EVPOLY_MM_SPORT_POLL_MS` default `250`
     - `EVPOLY_MM_SPORT_EVENT_FALLBACK_POLL_MS` default `200`
@@ -96,7 +95,10 @@ Older entries may reference env keys that were removed in later commits.
 - `mm_sport_v1` now has a dedicated per-cycle ratio/depth watchdog for currently quoted markets (`src/main.rs`):
   - checks active MM Sport BUY conditions (including one-sided drift) every loop.
   - uses WS orderbook first, then token-scoped polling fallback.
-  - on breach (ratio/depth/one-sided), cancels the full condition pair, sets ratio pause, and waits for cooldown before next cancel.
+  - on breach (ratio/depth/one-sided), cancels the full condition pair, enters `ratio_blocked`, and applies short cancel cooldown to reduce churn.
+  - added queue-ahead/front-ratio guard for live BUY orders:
+    - per-order guard tracks `live_shares` and monotonic `ahead_shares` at price level;
+    - runtime breach now includes front-ratio (`live / (ahead + live)`) not just visible top-depth ratio.
   - WS subscription scope now refreshes from active markets plus active MM Sport orders so event-driven checks stay scoped to live exposure.
 
 - Pending-order reconciliation hardening for MM strategies (`src/tracking_db.rs`):

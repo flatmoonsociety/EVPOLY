@@ -286,7 +286,6 @@ pub struct MmSportConfig {
     pub max_share_ratio: f64,
     pub min_top_depth_usd: f64,
     pub pause_after_fill_sec: u64,
-    pub ratio_breach_pause_sec: u64,
     pub ratio_breach_cancel_cooldown_ms: i64,
     pub reprice_min_interval_ms: i64,
     pub size_requote_delta_pct: f64,
@@ -322,8 +321,6 @@ impl MmSportConfig {
             max_share_ratio: env_f64("EVPOLY_MM_SPORT_MAX_SHARE_RATIO", 0.02).clamp(0.01, 0.99),
             min_top_depth_usd: env_f64("EVPOLY_MM_SPORT_MIN_TOP_DEPTH_USD", 100_000.0).max(0.0),
             pause_after_fill_sec: env_u64("EVPOLY_MM_SPORT_PAUSE_AFTER_FILL_SEC", 7_200)
-                .clamp(60, 86_400),
-            ratio_breach_pause_sec: env_u64("EVPOLY_MM_SPORT_RATIO_BREACH_PAUSE_SEC", 900)
                 .clamp(60, 86_400),
             ratio_breach_cancel_cooldown_ms: env_u64(
                 "EVPOLY_MM_SPORT_RATIO_BREACH_CANCEL_COOLDOWN_MS",
