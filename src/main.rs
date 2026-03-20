@@ -68,7 +68,7 @@ use polymarket_arbitrage_bot::strategy::{
 use polymarket_arbitrage_bot::strategy_decider::{self, PremarketIntent, StrategyDeciderConfig};
 use polymarket_arbitrage_bot::tracking_db::{
     db_contention_premarket_throttle_factor, db_lock_contention_snapshot, PendingOrderRecord,
-    StrategyFeatureSnapshotIntentRecord, TrackingDb,
+    StrategyFeatureSnapshotIntentRecord, TrackingDb, TradeEventRecord,
 };
 use polymarket_arbitrage_bot::trader::{EntryExecutionMode, Trader};
 use serde::{Deserialize, Serialize};
@@ -1215,6 +1215,71 @@ fn mm_sport_order_still_active(tracking_db: &TrackingDb, order_id: &str) -> bool
         .unwrap_or(false)
 }
 
+fn mm_sport_record_buy_fill_from_pending(
+    tracking_db: &TrackingDb,
+    row: &PendingOrderRecord,
+    matched_units: f64,
+    price_hint: Option<f64>,
+    reason: &'static str,
+) -> bool {
+    if !row.side.eq_ignore_ascii_case("BUY") {
+        return false;
+    }
+    let order_id = row.order_id.trim();
+    if order_id.is_empty() || !matched_units.is_finite() || matched_units <= 0.0 {
+        return false;
+    }
+    let fill_price = price_hint
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .or_else(|| (row.price.is_finite() && row.price > 0.0).then_some(row.price))
+        .or_else(|| {
+            (row.size_usd.is_finite() && row.size_usd > 0.0)
+                .then_some(row.size_usd / matched_units.max(1e-9))
+                .filter(|value| value.is_finite() && *value > 0.0)
+        });
+    let notional_usd = fill_price
+        .map(|price| price * matched_units)
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .or_else(|| (row.size_usd.is_finite() && row.size_usd > 0.0).then_some(row.size_usd));
+    let reason_json = json!({
+        "mode": "runtime_fill",
+        "fill_source": "mm_sport_terminal_reconcile",
+        "reason": reason,
+        "order_id": order_id,
+        "trade_key": row.trade_key,
+        "matched_units": matched_units,
+    })
+    .to_string();
+    let fill_event = TradeEventRecord {
+        event_key: Some(format!("entry_fill_order:{}", order_id)),
+        ts_ms: chrono::Utc::now().timestamp_millis(),
+        period_timestamp: row.period_timestamp,
+        timeframe: row.timeframe.clone(),
+        strategy_id: row.strategy_id.clone(),
+        asset_symbol: row.asset_symbol.clone(),
+        condition_id: row.condition_id.clone(),
+        token_id: Some(row.token_id.clone()),
+        token_type: None,
+        side: Some("BUY".to_string()),
+        event_type: "ENTRY_FILL".to_string(),
+        price: fill_price,
+        units: Some(matched_units),
+        notional_usd,
+        pnl_usd: None,
+        reason: Some(reason_json),
+    };
+    match tracking_db.mark_pending_order_filled_with_event(order_id, &fill_event) {
+        Ok(_) => true,
+        Err(e) => {
+            warn!(
+                "MM sport fill transition persist failed order_id={} condition_id={:?} token_id={} err={}",
+                order_id, row.condition_id, row.token_id, e
+            );
+            false
+        }
+    }
+}
+
 async fn mm_sport_cancel_pending_rows(
     api: &PolymarketApi,
     tracking_db: &TrackingDb,
@@ -1231,6 +1296,8 @@ async fn mm_sport_cancel_pending_rows(
             continue;
         }
         let mut terminal_status: Option<&'static str> = None;
+        let mut matched_fill_units: Option<f64> = None;
+        let mut matched_fill_price: Option<f64> = None;
         if mm_sport_is_exchange_order_id(order_id) {
             let mut cancel_context: Option<String> = None;
             match api.cancel_order(order_id).await {
@@ -1262,6 +1329,18 @@ async fn mm_sport_cancel_pending_rows(
             if terminal_status.is_none() {
                 match api.get_order(order_id).await {
                     Ok(order_status) => {
+                        if row.side.eq_ignore_ascii_case("BUY") {
+                            let matched = f64::try_from(order_status.size_matched)
+                                .ok()
+                                .unwrap_or(0.0)
+                                .max(0.0);
+                            if matched > 0.0 {
+                                matched_fill_units = Some(matched);
+                                matched_fill_price = f64::try_from(order_status.price)
+                                    .ok()
+                                    .filter(|value| value.is_finite() && *value > 0.0);
+                            }
+                        }
                         terminal_status = mm_pending_terminal_status(&order_status.status);
                     }
                     Err(lookup_err) => {
@@ -1283,7 +1362,23 @@ async fn mm_sport_cancel_pending_rows(
             terminal_status = Some("CANCELED");
         }
         if let Some(status) = terminal_status {
-            let _ = tracking_db.update_pending_order_status(order_id, status);
+            let fill_recorded = row.side.eq_ignore_ascii_case("BUY")
+                && matches!(status, "FILLED" | "CANCELED")
+                && matched_fill_units
+                    .filter(|value| value.is_finite() && *value > 0.0)
+                    .map(|units| {
+                        mm_sport_record_buy_fill_from_pending(
+                            tracking_db,
+                            row,
+                            units,
+                            matched_fill_price,
+                            "mm_sport_cancel_terminal_reconcile",
+                        )
+                    })
+                    .unwrap_or(false);
+            if !fill_recorded {
+                let _ = tracking_db.update_pending_order_status(order_id, status);
+            }
             canceled = canceled.saturating_add(1);
         }
     }
@@ -13507,8 +13602,20 @@ async fn main() -> Result<()> {
                                 if let Some(terminal_status) =
                                     mm_pending_terminal_status(&status.status)
                                 {
-                                    let _ = tracking_db_for_mm_sport
-                                        .update_pending_order_status(order_id, terminal_status);
+                                    let fill_persisted = row.side.eq_ignore_ascii_case("BUY")
+                                        && matches!(terminal_status, "FILLED" | "CANCELED")
+                                        && matched > 0.0
+                                        && mm_sport_record_buy_fill_from_pending(
+                                            &tracking_db_for_mm_sport,
+                                            row,
+                                            matched,
+                                            Some(row.price),
+                                            "mm_sport_ws_terminal_reconcile",
+                                        );
+                                    if !fill_persisted {
+                                        let _ = tracking_db_for_mm_sport
+                                            .update_pending_order_status(order_id, terminal_status);
+                                    }
                                     log_event(
                                         "mm_sport_ws_order_terminal_reconcile",
                                         json!({
@@ -13519,6 +13626,7 @@ async fn main() -> Result<()> {
                                             "ws_status": format!("{:?}", status.status),
                                             "terminal_status": terminal_status,
                                             "matched_shares": matched,
+                                            "fill_persisted": fill_persisted,
                                         }),
                                     );
                                 }

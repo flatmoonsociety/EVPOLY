@@ -77,6 +77,11 @@ Older entries may reference env keys that were removed in later commits.
 
 ### 2026-03-20
 
+- `mm_sport_v1` terminal fill persistence is now written atomically during MM Sport-owned reconciliation paths (`src/main.rs`):
+  - when MM Sport sees terminal BUY fills from WS status updates or cancel/get-order reconciliation, it now writes canonical `ENTRY_FILL` (`entry_fill_order:<order_id>`) via `mark_pending_order_filled_with_event` instead of only flipping `pending_orders.status`.
+  - canceled-with-partial-match BUY orders now persist matched units/notional into `trade_events`/`fills_v2`/`positions_v2` through the same atomic fill transition path.
+  - prevents wallet-live MM Sport inventory from drifting out of strategy attribution after terminal reconciliations, so inventory exit logic can see real MM Sport exposure.
+
 - `mm_sport_v1` cancel-state reconciliation was hardened to prevent exchange/live vs local/canceled drift (`src/main.rs`, `src/api.rs`):
   - MM Sport cancel path now requires cancel confirmation from CLOB response (`canceled` contains the specific `order_id`) before writing local `CANCELED`.
   - when cancel is unconfirmed, MM Sport now falls back to `get_order` terminal reconciliation (`FILLED`/`CANCELED`/`STALE`) and keeps rows active if exchange still reports live.
