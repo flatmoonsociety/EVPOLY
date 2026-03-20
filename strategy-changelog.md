@@ -77,6 +77,11 @@ Older entries may reference env keys that were removed in later commits.
 
 ### 2026-03-20
 
+- `mm_sport_v1` requote duplicate-order guard + pending-write fail-safe (`src/main.rs`):
+  - normal BUY requote and inventory-exit SELL requote now block repost when cancel attempts are unresolved and the old order still remains active in `pending_orders` (new telemetry: `mm_sport_requote_blocked_unresolved_cancel`).
+  - MM Sport order placement now fails closed if `pending_orders` upsert fails: runtime immediately attempts exchange cancel for the just-posted order and returns an error instead of continuing with untracked live exposure.
+  - affects `mm_sport_v1` live quoting/exit paths across discovered sports markets by preventing same-side duplicate reposts under cancel/DB race conditions.
+
 - `mm_rewards_v1` restart safety + auto-selection resilience + config-surface alignment (`src/main.rs`, `src/mm/mod.rs`, `.env.example`, `.env.full.example`):
   - startup cancel-all skip flag is now runtime-configurable and defaults safe for MM rewards restarts:
     - `EVPOLY_STARTUP_CANCEL_ALL_SKIP_IF_MM_REWARDS` now defaults to `true` in runtime (was effectively hardcoded off).

@@ -1199,6 +1199,22 @@ fn mm_sport_is_exchange_order_id(order_id: &str) -> bool {
     !body.is_empty() && body.chars().all(|ch| ch.is_ascii_hexdigit())
 }
 
+fn mm_pending_order_status_is_active(status: &str) -> bool {
+    matches!(
+        status.trim().to_ascii_uppercase().as_str(),
+        "OPEN" | "PENDING" | "PLACED" | "LIVE"
+    )
+}
+
+fn mm_sport_order_still_active(tracking_db: &TrackingDb, order_id: &str) -> bool {
+    tracking_db
+        .get_pending_order_by_id(order_id)
+        .ok()
+        .flatten()
+        .map(|row| mm_pending_order_status_is_active(row.status.as_str()))
+        .unwrap_or(false)
+}
+
 async fn mm_sport_cancel_pending_rows(
     api: &PolymarketApi,
     tracking_db: &TrackingDb,
@@ -1295,7 +1311,22 @@ async fn mm_sport_place_order(
         side: side.to_ascii_uppercase(),
         status: "OPEN".to_string(),
     };
-    let _ = tracking_db.upsert_pending_order(&pending);
+    if let Err(db_err) = tracking_db.upsert_pending_order(&pending) {
+        warn!(
+            "MM sport pending upsert failed for order_id={} condition_id={} token_id={} side={} err={}",
+            order_id,
+            market.condition_id,
+            token_id,
+            side,
+            db_err
+        );
+        let _ = api.cancel_order(order_id.as_str()).await;
+        return Err(anyhow::anyhow!(
+            "mm_sport_pending_upsert_failed order_id={} err={}",
+            order_id,
+            db_err
+        ));
+    }
     Ok(Some(order_id))
 }
 
@@ -14624,7 +14655,7 @@ async fn main() -> Result<()> {
                                     }
                                 }
                                 if !sell_cancel_rows.is_empty() && can_sell_action {
-                                    let _ = mm_sport_cancel_pending_rows(
+                                    let canceled = mm_sport_cancel_pending_rows(
                                         &api_for_mm_sport,
                                         &tracking_db_for_mm_sport,
                                         sell_cancel_rows.as_slice(),
@@ -14632,7 +14663,34 @@ async fn main() -> Result<()> {
                                     .await;
                                     last_action_ms_by_token_side
                                         .insert(sell_key.clone(), now_ms_local);
-                                    keep_sell_id = None;
+                                    let unresolved_active = sell_cancel_rows
+                                        .iter()
+                                        .filter(|row| {
+                                            mm_sport_order_still_active(
+                                                &tracking_db_for_mm_sport,
+                                                row.order_id.as_str(),
+                                            )
+                                        })
+                                        .map(|row| row.order_id.clone())
+                                        .collect::<Vec<_>>();
+                                    if !unresolved_active.is_empty() {
+                                        log_event(
+                                            "mm_sport_requote_blocked_unresolved_cancel",
+                                            json!({
+                                                "strategy_id": STRATEGY_ID_MM_SPORT_V1,
+                                                "condition_id": market.condition_id,
+                                                "token_id": token_id,
+                                                "side": "SELL",
+                                                "attempted_cancel_count": sell_cancel_rows.len(),
+                                                "resolved_cancel_count": canceled,
+                                                "unresolved_active_count": unresolved_active.len(),
+                                                "unresolved_active_order_ids": unresolved_active.iter().take(10).cloned().collect::<Vec<_>>()
+                                            }),
+                                        );
+                                        keep_sell_id = unresolved_active.first().cloned();
+                                    } else {
+                                        keep_sell_id = None;
+                                    }
                                 }
 
                                 if keep_sell_id.is_none() && can_sell_action {
@@ -14871,14 +14929,41 @@ async fn main() -> Result<()> {
                             }
 
                             if !buy_cancel_rows.is_empty() && can_buy_action {
-                                let _ = mm_sport_cancel_pending_rows(
+                                let canceled = mm_sport_cancel_pending_rows(
                                     &api_for_mm_sport,
                                     &tracking_db_for_mm_sport,
                                     buy_cancel_rows.as_slice(),
                                 )
                                 .await;
                                 last_action_ms_by_token_side.insert(buy_key.clone(), now_ms_local);
-                                keep_buy_id = None;
+                                let unresolved_active = buy_cancel_rows
+                                    .iter()
+                                    .filter(|row| {
+                                        mm_sport_order_still_active(
+                                            &tracking_db_for_mm_sport,
+                                            row.order_id.as_str(),
+                                        )
+                                    })
+                                    .map(|row| row.order_id.clone())
+                                    .collect::<Vec<_>>();
+                                if !unresolved_active.is_empty() {
+                                    log_event(
+                                        "mm_sport_requote_blocked_unresolved_cancel",
+                                        json!({
+                                            "strategy_id": STRATEGY_ID_MM_SPORT_V1,
+                                            "condition_id": market.condition_id,
+                                            "token_id": token_id,
+                                            "side": "BUY",
+                                            "attempted_cancel_count": buy_cancel_rows.len(),
+                                            "resolved_cancel_count": canceled,
+                                            "unresolved_active_count": unresolved_active.len(),
+                                            "unresolved_active_order_ids": unresolved_active.iter().take(10).cloned().collect::<Vec<_>>()
+                                        }),
+                                    );
+                                    keep_buy_id = unresolved_active.first().cloned();
+                                } else {
+                                    keep_buy_id = None;
+                                }
                             }
 
                             if keep_buy_id.is_none() && can_buy_action {
