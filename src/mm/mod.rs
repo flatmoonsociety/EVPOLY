@@ -292,6 +292,7 @@ pub struct MmSportConfig {
     pub bust_pause_min_sec: u64,
     pub bust_pause_max_sec: u64,
     pub ratio_breach_cancel_cooldown_ms: i64,
+    pub ratio_pause_sec: u64,
     pub reprice_min_interval_ms: i64,
     pub quote_expiry_min_sec: u64,
     pub quote_expiry_max_sec: u64,
@@ -351,6 +352,7 @@ impl MmSportConfig {
                 200,
             )
             .clamp(50, 60_000) as i64,
+            ratio_pause_sec: env_u64("EVPOLY_MM_SPORT_RATIO_PAUSE_SEC", 900).clamp(60, 86_400),
             reprice_min_interval_ms: env_u64("EVPOLY_MM_SPORT_REPRICE_MIN_INTERVAL_MS", 600)
                 .clamp(50, 60_000) as i64,
             quote_expiry_min_sec,

@@ -2921,3 +2921,23 @@ Older entries may reference env keys that were removed in later commits.
     - `EVPOLY_MM_DUST_SELL_INTER_ORDER_DELAY_MS=1000`
     - `EVPOLY_MM_DUST_SELL_TIMEOUT_SEC=180` (so hourly wallet-sync dust call can finish 20 paced orders without client timeout).
   - Affects: `mm_rewards_v1` hourly dust cleanup pacing/reliability only (no change to market-making quote logic).
+
+### 2026-03-20
+
+- `mm_sport_v1` ratio-breach hard cooldown to stop cancel/requote churn:
+  - Updated `src/main.rs` MM Sport runtime path:
+    - added condition-scoped ratio pause state (`ratio_pause_until_by_condition`).
+    - on ratio breach, strategy now starts a fixed cooldown and suppresses new BUY quoting until cooldown expiry (inventory exit SELL path remains allowed).
+    - cooldown is applied from all ratio breach sources: watchdog pair check, pair planning gate, and per-token runtime ratio gate.
+    - heartbeat telemetry now reports `ratio_paused_markets`.
+  - Updated `src/mm/mod.rs` config:
+    - added `EVPOLY_MM_SPORT_RATIO_PAUSE_SEC` (default `900` seconds).
+  - Updated env templates:
+    - `.env.example` and `.env.full.example` now include `EVPOLY_MM_SPORT_RATIO_PAUSE_SEC=900`.
+  - Affects: `mm_sport_v1` pregame reward markets across all discovered sports conditions in active runtime.
+
+- `mm_rewards_v1` dust-sell default max-notional increased:
+  - Updated `src/trader.rs`:
+    - `EVPOLY_MM_DUST_SELL_MAX_NOTIONAL_USD` default changed from `5` to `20` (still env-overridable).
+  - Updated `.env.full.example` default to `EVPOLY_MM_DUST_SELL_MAX_NOTIONAL_USD=20`.
+  - Affects: `mm_rewards_v1` dust cleanup sizing cap (`/admin/mm/dust-sell` and scheduled dust sweep paths).

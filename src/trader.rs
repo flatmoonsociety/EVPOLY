@@ -9998,7 +9998,7 @@ impl Trader {
         std::env::var("EVPOLY_MM_DUST_SELL_MAX_NOTIONAL_USD")
             .ok()
             .and_then(|v| v.parse::<f64>().ok())
-            .unwrap_or(5.0)
+            .unwrap_or(20.0)
             .clamp(0.10, 1_000.0)
     }
 
