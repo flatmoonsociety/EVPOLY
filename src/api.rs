@@ -377,7 +377,7 @@ impl PolymarketApi {
             .unwrap_or(2)
             .clamp(0, 8);
         let ws_enabled = Self::env_bool("EVPOLY_PM_WS_ENABLE", true);
-        let ws_market_stale_ms = Self::env_i64("EVPOLY_PM_WS_MARKET_STALE_MS", 2_500).max(250);
+        let ws_market_stale_ms = Self::env_i64("EVPOLY_PM_WS_MARKET_STALE_MS", 600).max(250);
         let ws_order_stale_ms = Self::env_i64("EVPOLY_PM_WS_ORDER_STALE_MS", 5_000).max(500);
 
         Self {

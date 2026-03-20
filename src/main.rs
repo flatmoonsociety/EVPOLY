@@ -1214,11 +1214,36 @@ async fn mm_sport_cancel_pending_rows(
         if order_id.is_empty() || !seen.insert(order_id.to_string()) {
             continue;
         }
+        let mut terminal_status: Option<&'static str> = None;
         if mm_sport_is_exchange_order_id(order_id) {
-            let _ = api.cancel_order(order_id).await;
+            match api.cancel_order(order_id).await {
+                Ok(_) => {
+                    terminal_status = Some("CANCELED");
+                }
+                Err(cancel_err) => match api.get_order(order_id).await {
+                    Ok(order_status) => {
+                        terminal_status = mm_pending_terminal_status(&order_status.status);
+                    }
+                    Err(lookup_err) => {
+                        let lookup_error_text = lookup_err.to_string();
+                        if mm_order_lookup_error_is_terminal(lookup_error_text.as_str()) {
+                            terminal_status = Some("STALE");
+                        } else {
+                            warn!(
+                                "MM sport cancel unresolved order_id={} cancel_err={} lookup_err={}",
+                                order_id, cancel_err, lookup_error_text
+                            );
+                        }
+                    }
+                },
+            }
+        } else {
+            terminal_status = Some("CANCELED");
         }
-        let _ = tracking_db.update_pending_order_status(order_id, "CANCELED");
-        canceled = canceled.saturating_add(1);
+        if let Some(status) = terminal_status {
+            let _ = tracking_db.update_pending_order_status(order_id, status);
+            canceled = canceled.saturating_add(1);
+        }
     }
     canceled
 }
@@ -12909,7 +12934,7 @@ async fn main() -> Result<()> {
             );
         } else {
             eprintln!(
-                "🏀 MM Sport enabled (poll_ms={}, event_driven={}, event_fallback_poll_ms={}, ws_stale_ms={}, discovery_refresh_sec={}, rewards_page_budget={}, min_reward_rate_per_day={:.2}, quote_size_mult={:.3}, max_share_ratio={:.3}, min_top_depth_usd={:.2}, pause_after_fill_sec={}, ratio_breach_cancel_cooldown_ms={}, post_only={}, require_reward_eligible={}, pregame_only={}, match_only={}, max_markets={})",
+                "🏀 MM Sport enabled (poll_ms={}, event_driven={}, event_fallback_poll_ms={}, ws_stale_ms={}, discovery_refresh_sec={}, rewards_page_budget={}, min_reward_rate_per_day={:.2}, quote_size_mult={:.3}, pair_baseline_quote_size_mult={:.3}, max_share_ratio={:.3}, min_top_depth_usd={:.2}, pause_after_fill_sec={}, ratio_breach_cancel_cooldown_ms={}, post_only={}, require_reward_eligible={}, pregame_only={}, match_only={}, max_markets={})",
                 mm_sport_cfg.poll_ms,
                 mm_sport_cfg.event_driven_enable,
                 mm_sport_cfg.event_fallback_poll_ms,
@@ -12918,6 +12943,7 @@ async fn main() -> Result<()> {
                 mm_sport_cfg.rewards_page_budget,
                 mm_sport_cfg.min_reward_rate_per_day,
                 mm_sport_cfg.quote_size_mult,
+                mm_sport_cfg.pair_baseline_quote_size_mult,
                 mm_sport_cfg.max_share_ratio,
                 mm_sport_cfg.min_top_depth_usd,
                 mm_sport_cfg.pause_after_fill_sec,
@@ -13800,7 +13826,7 @@ async fn main() -> Result<()> {
                                     guard.ahead_shares = external_same_price;
                                 } else {
                                     let current_ahead = guard.ahead_shares.max(0.0);
-                                    if !current_ahead.is_finite() || current_ahead <= 0.0 {
+                                    if !current_ahead.is_finite() {
                                         guard.ahead_shares = external_same_price;
                                     } else {
                                         guard.ahead_shares = current_ahead.min(external_same_price);
@@ -14013,7 +14039,15 @@ async fn main() -> Result<()> {
                             mm_sport_prestart_exit_mode(now_ms, market.game_start_ts_ms);
                         let condition_has_inventory =
                             inventory_condition_ids.contains(market.condition_id.as_str());
-                        let inventory_exit_mode = prestart_exit_mode || condition_has_inventory;
+                        let entry_pause_until = entry_pause_until_by_condition
+                            .get(&market.condition_id)
+                            .copied()
+                            .unwrap_or(0);
+                        let fill_pause_active = entry_pause_until > now_ms;
+                        let post_pause_inventory_exit_mode =
+                            condition_has_inventory && !fill_pause_active;
+                        let inventory_exit_mode =
+                            prestart_exit_mode || post_pause_inventory_exit_mode;
                         if mm_sport_cfg_for_loop.pregame_only
                             && market.game_start_ts_ms > 0
                             && market.game_start_ts_ms <= now_ms
@@ -14030,16 +14064,17 @@ async fn main() -> Result<()> {
                             continue;
                         }
 
-                        let entry_pause_until = entry_pause_until_by_condition
-                            .get(&market.condition_id)
-                            .copied()
-                            .unwrap_or(0);
-                        if entry_pause_until > now_ms && !inventory_exit_mode {
+                        if fill_pause_active && !prestart_exit_mode {
                             if let Some(rows) = open_orders_by_condition.get(&market.condition_id) {
+                                let buy_rows = rows
+                                    .iter()
+                                    .filter(|row| row.side.eq_ignore_ascii_case("BUY"))
+                                    .cloned()
+                                    .collect::<Vec<_>>();
                                 let _ = mm_sport_cancel_pending_rows(
                                     &api_for_mm_sport,
                                     &tracking_db_for_mm_sport,
-                                    rows,
+                                    buy_rows.as_slice(),
                                 )
                                 .await;
                             }
@@ -14193,11 +14228,11 @@ async fn main() -> Result<()> {
                             }
 
                             // Hard pair-level gate: only quote this market when both outcomes
-                            // can support the baseline 1.2x reward size under max_share_ratio.
+                            // can support the configured baseline reward size under max_share_ratio.
                             // If either side cannot support baseline size at ratio cap, cancel
                             // both sides and stay out until depth recovers.
                             let baseline_shares = (market.reward_min_size_shares
-                                * MM_SPORT_LOW_DEPTH_QUOTE_SIZE_MULT)
+                                * mm_sport_cfg_for_loop.pair_baseline_quote_size_mult)
                                 .max(1.0);
                             let ratio = mm_sport_cfg_for_loop.max_share_ratio.clamp(0.01, 0.99);
                             let required_ext_top_shares =
@@ -14223,6 +14258,7 @@ async fn main() -> Result<()> {
                                         "strategy_id": STRATEGY_ID_MM_SPORT_V1,
                                         "condition_id": market.condition_id,
                                         "baseline_shares": baseline_shares,
+                                        "baseline_quote_size_mult": mm_sport_cfg_for_loop.pair_baseline_quote_size_mult,
                                         "max_share_ratio": ratio,
                                         "required_ext_top_shares": required_ext_top_shares,
                                         "up_ext_top_bid_shares": up_ext_top_bid_shares,
@@ -14467,7 +14503,10 @@ async fn main() -> Result<()> {
                                         "token_id": token_id,
                                         "game_start_ts_ms": market.game_start_ts_ms,
                                         "prestart_exit_mode": prestart_exit_mode,
-                                        "inventory_triggered_exit_mode": condition_has_inventory,
+                                        "inventory_triggered_exit_mode": post_pause_inventory_exit_mode,
+                                        "condition_has_inventory": condition_has_inventory,
+                                        "fill_pause_active": fill_pause_active,
+                                        "entry_pause_until_ms": entry_pause_until,
                                         "seconds_to_start": (market.game_start_ts_ms.saturating_sub(now_ms_local) / 1_000).max(0),
                                         "inventory_shares": inventory_surplus
                                     }),

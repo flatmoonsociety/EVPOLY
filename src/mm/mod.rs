@@ -283,6 +283,7 @@ pub struct MmSportConfig {
     pub rewards_page_budget: u32,
     pub min_reward_rate_per_day: f64,
     pub quote_size_mult: f64,
+    pub pair_baseline_quote_size_mult: f64,
     pub max_share_ratio: f64,
     pub min_top_depth_usd: f64,
     pub pause_after_fill_sec: u64,
@@ -318,13 +319,18 @@ impl MmSportConfig {
             min_reward_rate_per_day: env_f64("EVPOLY_MM_SPORT_MIN_REWARD_RATE_PER_DAY", 300.0)
                 .max(0.0),
             quote_size_mult: env_f64("EVPOLY_MM_SPORT_QUOTE_SIZE_MULT", 1.2).clamp(0.1, 20.0),
+            pair_baseline_quote_size_mult: env_f64(
+                "EVPOLY_MM_SPORT_PAIR_BASELINE_QUOTE_SIZE_MULT",
+                1.2,
+            )
+            .clamp(0.1, 20.0),
             max_share_ratio: env_f64("EVPOLY_MM_SPORT_MAX_SHARE_RATIO", 0.02).clamp(0.01, 0.99),
             min_top_depth_usd: env_f64("EVPOLY_MM_SPORT_MIN_TOP_DEPTH_USD", 100_000.0).max(0.0),
             pause_after_fill_sec: env_u64("EVPOLY_MM_SPORT_PAUSE_AFTER_FILL_SEC", 7_200)
                 .clamp(60, 86_400),
             ratio_breach_cancel_cooldown_ms: env_u64(
                 "EVPOLY_MM_SPORT_RATIO_BREACH_CANCEL_COOLDOWN_MS",
-                2_000,
+                200,
             )
             .clamp(50, 60_000) as i64,
             reprice_min_interval_ms: env_u64("EVPOLY_MM_SPORT_REPRICE_MIN_INTERVAL_MS", 600)

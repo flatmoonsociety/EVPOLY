@@ -101,6 +101,16 @@ Older entries may reference env keys that were removed in later commits.
     - runtime breach now includes front-ratio (`live / (ahead + live)`) not just visible top-depth ratio.
   - WS subscription scope now refreshes from active markets plus active MM Sport orders so event-driven checks stay scoped to live exposure.
 
+- `mm_sport_v1` inventory pause/exit, queue guard, and cancel reconciliation were tightened for sports pregame markets across all discovered symbols/timeframes (`src/main.rs`, `src/mm/mod.rs`, `src/api.rs`, `src/polymarket_ws.rs`, `.env.example`, `.env.full.example`):
+  - fill pause now gates inventory-only unwind until pause expiry; prestart windows (`T-60m`/`T-5m`) still allow forced exit behavior.
+  - queue-ahead tracking is now strictly non-increasing for a live order; once `ahead_shares` reaches zero it is not reset upward unless the order context changes.
+  - MM Sport cancel helper now marks local pending rows terminal only after successful exchange cancel or terminal reconciliation (`FILLED`/`CANCELED`/`STALE`), avoiding false local safety on cancel errors.
+  - exposure freshness defaults were tightened:
+    - `EVPOLY_PM_WS_MARKET_STALE_MS`: runtime default `2500 -> 600`, env full example `1000 -> 600`.
+    - `EVPOLY_MM_SPORT_WS_STALE_MS`: `2500 -> 600`.
+    - `EVPOLY_MM_SPORT_RATIO_BREACH_CANCEL_COOLDOWN_MS`: `2000 -> 200`.
+  - hardcoded pair baseline gate sizing (`1.2x`) is now env-configurable with `EVPOLY_MM_SPORT_PAIR_BASELINE_QUOTE_SIZE_MULT` (default `1.2`).
+
 - Pending-order reconciliation hardening for MM strategies (`src/tracking_db.rs`):
   - `update_pending_order_status` and `update_pending_order_status_batch_any` no longer downgrade `FILLED` rows to non-filled terminal states.
   - missing-entry-fill backfill now also considers rows with non-null `filled_at_ms` even if status changed from `FILLED`.

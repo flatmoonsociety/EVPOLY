@@ -50,7 +50,7 @@ impl Default for PolymarketWsConfig {
         let refresh_sec = env_u64("EVPOLY_PM_WS_REFRESH_SEC", 30).max(10);
         let backoff_min_sec = env_u64("EVPOLY_PM_WS_BACKOFF_MIN_SEC", 1).max(1);
         let backoff_max_sec = env_u64("EVPOLY_PM_WS_BACKOFF_MAX_SEC", 20).max(backoff_min_sec);
-        let market_stale_ms = env_i64("EVPOLY_PM_WS_MARKET_STALE_MS", 2_500).max(250);
+        let market_stale_ms = env_i64("EVPOLY_PM_WS_MARKET_STALE_MS", 600).max(250);
         let order_stale_ms = env_i64("EVPOLY_PM_WS_ORDER_STALE_MS", 5_000).max(500);
         Self {
             enabled: env_bool("EVPOLY_PM_WS_ENABLE", true),
