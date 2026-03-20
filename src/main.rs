@@ -13256,6 +13256,10 @@ async fn main() -> Result<()> {
                 > = std::collections::HashMap::new();
                 let mut last_exit_fallback_refresh_ms = 0_i64;
                 let mut last_inventory_reconcile_attempt_ms = 0_i64;
+                let mut orphan_cancel_retry_after_ms_by_condition: std::collections::HashMap<
+                    String,
+                    i64,
+                > = std::collections::HashMap::new();
 
                 loop {
                     let loop_now_ms = chrono::Utc::now().timestamp_millis();
@@ -14268,6 +14272,57 @@ async fn main() -> Result<()> {
                         if active_condition_ids.insert(market.condition_id.to_ascii_lowercase()) {
                             active_markets.push(market.clone());
                         }
+                    }
+                    let orphan_cancel_candidates = open_orders_by_condition
+                        .iter()
+                        .filter(|(condition_id, rows)| {
+                            !rows.is_empty()
+                                && !active_condition_ids
+                                    .contains(&condition_id.to_ascii_lowercase())
+                        })
+                        .map(|(condition_id, rows)| (condition_id.clone(), rows.clone()))
+                        .collect::<Vec<_>>();
+                    for (condition_id, rows) in orphan_cancel_candidates {
+                        let retry_after_ms = orphan_cancel_retry_after_ms_by_condition
+                            .get(condition_id.as_str())
+                            .copied()
+                            .unwrap_or(0);
+                        if retry_after_ms > now_ms {
+                            continue;
+                        }
+                        let canceled = mm_sport_cancel_pending_rows(
+                            &api_for_mm_sport,
+                            &tracking_db_for_mm_sport,
+                            rows.as_slice(),
+                        )
+                        .await;
+                        let unresolved_active = rows
+                            .iter()
+                            .filter(|row| {
+                                mm_sport_order_still_active(
+                                    &tracking_db_for_mm_sport,
+                                    row.order_id.as_str(),
+                                )
+                            })
+                            .count();
+                        let retry_ms = if unresolved_active > 0 {
+                            30_000_i64
+                        } else {
+                            5_000_i64
+                        };
+                        orphan_cancel_retry_after_ms_by_condition
+                            .insert(condition_id.clone(), now_ms.saturating_add(retry_ms));
+                        log_event(
+                            "mm_sport_orphan_condition_cancel_sweep",
+                            json!({
+                                "strategy_id": STRATEGY_ID_MM_SPORT_V1,
+                                "condition_id": condition_id,
+                                "attempted_cancel_count": rows.len(),
+                                "resolved_cancel_count": canceled,
+                                "unresolved_active_count": unresolved_active,
+                                "retry_ms": retry_ms
+                            }),
+                        );
                     }
                     let mut refreshed_scope_token_ids: std::collections::HashSet<String> =
                         std::collections::HashSet::new();
