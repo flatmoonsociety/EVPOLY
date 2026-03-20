@@ -1179,24 +1179,44 @@ fn mm_sport_random_pause_until_ms(
 fn mm_sport_random_quote_expiration(
     now_ms: i64,
     condition_id: &str,
-    token_id: &str,
-    side: &str,
     min_sec: u64,
     max_sec: u64,
 ) -> (i64, i64, u64) {
     let seed_key = format!(
-        "mm_sport:quote_expiry:{}:{}:{}",
+        "mm_sport:quote_expiry:{}",
         condition_id.trim().to_ascii_lowercase(),
-        token_id.trim().to_ascii_lowercase(),
-        side.trim().to_ascii_uppercase(),
     );
     let ttl_sec = mm_sport_random_range_u64(now_ms, seed_key.as_str(), min_sec, max_sec);
+    let min_ttl_ms = i64::try_from(min_sec.saturating_mul(1_000))
+        .ok()
+        .unwrap_or(61_000)
+        .max(1_000);
     let ttl_ms = i64::try_from(ttl_sec.saturating_mul(1_000))
         .ok()
-        .unwrap_or(65_000)
-        .max(61_000);
+        .unwrap_or(min_ttl_ms)
+        .max(min_ttl_ms);
     let expiration_ms = now_ms.saturating_add(ttl_ms);
     let expiration_ts = expiration_ms.saturating_div(1_000).max(1);
+    (expiration_ts, expiration_ms, ttl_sec)
+}
+
+fn mm_sport_condition_quote_expiration(
+    quote_expiry_by_condition: &mut std::collections::HashMap<String, (i64, u64)>,
+    now_ms: i64,
+    condition_id: &str,
+    min_sec: u64,
+    max_sec: u64,
+) -> (i64, i64, u64) {
+    let condition_key = condition_id.trim().to_ascii_lowercase();
+    if let Some((expiration_ms, ttl_sec)) = quote_expiry_by_condition.get(&condition_key).copied() {
+        if expiration_ms > now_ms {
+            let expiration_ts = expiration_ms.saturating_div(1_000).max(1);
+            return (expiration_ts, expiration_ms, ttl_sec);
+        }
+    }
+    let (expiration_ts, expiration_ms, ttl_sec) =
+        mm_sport_random_quote_expiration(now_ms, condition_id, min_sec, max_sec);
+    quote_expiry_by_condition.insert(condition_key, (expiration_ms, ttl_sec));
     (expiration_ts, expiration_ms, ttl_sec)
 }
 
@@ -13249,6 +13269,8 @@ async fn main() -> Result<()> {
                     std::collections::HashMap::new();
                 let mut order_expiry_ms_by_order_id: std::collections::HashMap<String, i64> =
                     std::collections::HashMap::new();
+                let mut quote_expiry_by_condition: std::collections::HashMap<String, (i64, u64)> =
+                    std::collections::HashMap::new();
                 let mut last_heartbeat_ms = 0_i64;
                 let mut fallback_exit_markets_by_condition: std::collections::HashMap<
                     String,
@@ -13328,6 +13350,8 @@ async fn main() -> Result<()> {
                     }
 
                     let now_ms = chrono::Utc::now().timestamp_millis();
+                    quote_expiry_by_condition
+                        .retain(|_, (expiration_ms, _)| *expiration_ms > now_ms);
                     if now_ms.saturating_sub(last_reconcile_failed_rearm_ms) >= 60_000 {
                         last_reconcile_failed_rearm_ms = now_ms;
                         if let Ok(rows) = tracking_db_for_mm_sport
@@ -13698,8 +13722,6 @@ async fn main() -> Result<()> {
                             let (_, expiration_ms, _) = mm_sport_random_quote_expiration(
                                 now_ms,
                                 condition_id,
-                                row.token_id.as_str(),
-                                row.side.as_str(),
                                 mm_sport_cfg_for_loop.quote_expiry_min_sec,
                                 mm_sport_cfg_for_loop.quote_expiry_max_sec,
                             );
@@ -15175,11 +15197,10 @@ async fn main() -> Result<()> {
                                             .insert(token_id.to_string(), now_ms_local);
                                     }
                                     let (expiration_ts, expiration_ms, expiration_ttl_sec) =
-                                        mm_sport_random_quote_expiration(
+                                        mm_sport_condition_quote_expiration(
+                                            &mut quote_expiry_by_condition,
                                             now_ms_local,
                                             market.condition_id.as_str(),
-                                            token_id,
-                                            "SELL",
                                             mm_sport_cfg_for_loop.quote_expiry_min_sec,
                                             mm_sport_cfg_for_loop.quote_expiry_max_sec,
                                         );
@@ -15545,11 +15566,10 @@ async fn main() -> Result<()> {
 
                             if keep_buy_id.is_none() && can_buy_action {
                                 let (expiration_ts, expiration_ms, expiration_ttl_sec) =
-                                    mm_sport_random_quote_expiration(
+                                    mm_sport_condition_quote_expiration(
+                                        &mut quote_expiry_by_condition,
                                         now_ms_local,
                                         market.condition_id.as_str(),
-                                        token_id,
-                                        "BUY",
                                         mm_sport_cfg_for_loop.quote_expiry_min_sec,
                                         mm_sport_cfg_for_loop.quote_expiry_max_sec,
                                     );

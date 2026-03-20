@@ -77,6 +77,13 @@ Older entries may reference env keys that were removed in later commits.
 
 ### 2026-03-20
 
+- `mm_sport_v1` quote GTD expiry defaults and per-market sampling were updated for pregame sports MM quoting (`src/main.rs`, `src/mm/mod.rs`, `.env.example`, `.env.full.example`):
+  - default randomized quote expiry window changed from `65s..125s` to `300s..600s`:
+    - `EVPOLY_MM_SPORT_QUOTE_EXPIRY_MIN_SEC=300`
+    - `EVPOLY_MM_SPORT_QUOTE_EXPIRY_MAX_SEC=600`
+  - quote expiry randomization is now condition-scoped (market-scoped), so paired outcomes in the same market share the same sampled TTL window per quote cycle.
+  - affects `mm_sport_v1` pregame sports markets across all discovered symbols/conditions.
+
 - Tick-metadata rate-limit handling was hardened across order submit + prewarm loops (`src/api.rs`, `src/main.rs`):
   - API prewarm now checks cache before backoff gate and marks tick-metadata backoff on prewarm-side rate limits (`tick_size` / `fee_rate` / `neg_risk`) instead of repeatedly falling through.
   - tick-metadata backoff now also has a short global guard (in addition to per-token) so cross-token 429 bursts pause metadata fetches platform-wide briefly instead of immediately thrashing new token ids.
