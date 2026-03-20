@@ -77,6 +77,20 @@ Older entries may reference env keys that were removed in later commits.
 
 ### 2026-03-20
 
+- `mm_sport_v1` gained a websocket taker-flow/bust guard to reduce adverse fills during fast sell pressure (`src/main.rs`, `src/polymarket_ws.rs`, `src/mm/mod.rs`, `.env.example`, `.env.full.example`):
+  - runtime now keeps a short rolling WS trade history per token and checks recent trade bursts against top bid context before and during quoting.
+  - on detected sweep/big taker-flow at or below bid, MM Sport cancels pair orders for that condition and places the condition into a short flow pause window; quoting resumes only after the pause expires and no fresh flow trigger is seen.
+  - new `EVPOLY_MM_SPORT_FLOW_*` env surface:
+    - `EVPOLY_MM_SPORT_FLOW_GUARD_ENABLE`
+    - `EVPOLY_MM_SPORT_FLOW_TRADE_WINDOW_MS`
+    - `EVPOLY_MM_SPORT_FLOW_RECENT_TRADES_MAX`
+    - `EVPOLY_MM_SPORT_FLOW_PAUSE_MS`
+    - `EVPOLY_MM_SPORT_FLOW_CANCEL_COOLDOWN_MS`
+    - `EVPOLY_MM_SPORT_FLOW_SWEEP_MIN_TICKS`
+    - `EVPOLY_MM_SPORT_FLOW_BIG_TRADE_MIN_SHARES`
+    - `EVPOLY_MM_SPORT_FLOW_BIG_TRADE_DEPTH_RATIO`
+  - affects `mm_sport_v1` pregame sports BUY-quote path across discovered sports conditions; inventory SELL unwind path is unchanged.
+
 - `mm_sport_v1` terminal fill persistence is now written atomically during MM Sport-owned reconciliation paths (`src/main.rs`):
   - when MM Sport sees terminal BUY fills from WS status updates or cancel/get-order reconciliation, it now writes canonical `ENTRY_FILL` (`entry_fill_order:<order_id>`) via `mark_pending_order_filled_with_event` instead of only flipping `pending_orders.status`.
   - canceled-with-partial-match BUY orders now persist matched units/notional into `trade_events`/`fills_v2`/`positions_v2` through the same atomic fill transition path.

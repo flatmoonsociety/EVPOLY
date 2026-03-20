@@ -12,7 +12,7 @@ use polymarket_client_sdk::types::{B256, U256};
 use polymarket_client_sdk::ws::config::Config as WsConnectionConfig;
 use rust_decimal::Decimal;
 use serde_json::json;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Once;
@@ -155,6 +155,7 @@ pub struct WsOrderStatusSnapshot {
 struct PolymarketWsInner {
     orderbooks: tokio::sync::RwLock<HashMap<String, WsOrderbookSnapshot>>,
     trades: tokio::sync::RwLock<HashMap<String, WsTradeSnapshot>>,
+    recent_trades: tokio::sync::RwLock<HashMap<String, VecDeque<WsTradeSnapshot>>>,
     order_statuses: tokio::sync::RwLock<HashMap<String, WsOrderStatusSnapshot>>,
     subscription_scope_targets: StdMutex<HashMap<String, WsSubscriptionScopeTargets>>,
     market_update_notify: tokio::sync::Notify,
@@ -181,6 +182,7 @@ pub fn new_shared_polymarket_ws_state() -> SharedPolymarketWsState {
         inner: Arc::new(PolymarketWsInner {
             orderbooks: tokio::sync::RwLock::new(HashMap::new()),
             trades: tokio::sync::RwLock::new(HashMap::new()),
+            recent_trades: tokio::sync::RwLock::new(HashMap::new()),
             order_statuses: tokio::sync::RwLock::new(HashMap::new()),
             subscription_scope_targets: StdMutex::new(HashMap::new()),
             market_update_notify: tokio::sync::Notify::new(),
@@ -331,6 +333,34 @@ impl SharedPolymarketWsState {
             return None;
         }
         Some(snapshot.clone())
+    }
+
+    pub async fn get_recent_trades(
+        &self,
+        token_id: &str,
+        max_age_ms: i64,
+        max_items: usize,
+    ) -> Vec<WsTradeSnapshot> {
+        if max_items == 0 {
+            return Vec::new();
+        }
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let map = self.inner.recent_trades.read().await;
+        let Some(history) = map.get(token_id) else {
+            return Vec::new();
+        };
+        history
+            .iter()
+            .rev()
+            .filter(|snapshot| {
+                snapshot.updated_ms > 0
+                    && now_ms.saturating_sub(snapshot.updated_ms) <= max_age_ms
+                    && snapshot.price > Decimal::ZERO
+                    && snapshot.size > Decimal::ZERO
+            })
+            .take(max_items.max(1))
+            .cloned()
+            .collect::<Vec<_>>()
     }
 
     fn set_market_connected(&self, shard_idx: usize, connected: bool) {
@@ -586,15 +616,26 @@ impl SharedPolymarketWsState {
 
         if price > Decimal::ZERO && matched_size > Decimal::ZERO {
             let token_id = asset_id.to_string();
-            self.inner.trades.write().await.insert(
-                token_id.clone(),
-                WsTradeSnapshot {
-                    token_id,
-                    price,
-                    size: matched_size,
-                    updated_ms,
-                },
-            );
+            let snapshot = WsTradeSnapshot {
+                token_id: token_id.clone(),
+                price,
+                size: matched_size,
+                updated_ms,
+            };
+            self.inner
+                .trades
+                .write()
+                .await
+                .insert(token_id.clone(), snapshot.clone());
+            let mut recent = self.inner.recent_trades.write().await;
+            let history = recent.entry(token_id).or_default();
+            history.push_back(snapshot);
+            if history.len() > 128 {
+                let drop_count = history.len().saturating_sub(128);
+                for _ in 0..drop_count {
+                    history.pop_front();
+                }
+            }
         }
         self.inner.user_update_notify.notify_waiters();
     }
@@ -612,6 +653,19 @@ impl SharedPolymarketWsState {
         {
             let mut trades = self.inner.trades.write().await;
             trades.retain(|_, v| now_ms.saturating_sub(v.updated_ms) <= prune_after_ms);
+        }
+        {
+            let mut recent = self.inner.recent_trades.write().await;
+            recent.retain(|_, history| {
+                while history
+                    .front()
+                    .map(|v| now_ms.saturating_sub(v.updated_ms) > prune_after_ms)
+                    .unwrap_or(false)
+                {
+                    history.pop_front();
+                }
+                !history.is_empty()
+            });
         }
     }
 }
