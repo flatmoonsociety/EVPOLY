@@ -13255,6 +13255,7 @@ async fn main() -> Result<()> {
                     MmSportMarket,
                 > = std::collections::HashMap::new();
                 let mut last_exit_fallback_refresh_ms = 0_i64;
+                let mut last_inventory_reconcile_attempt_ms = 0_i64;
 
                 loop {
                     let loop_now_ms = chrono::Utc::now().timestamp_millis();
@@ -15108,7 +15109,7 @@ async fn main() -> Result<()> {
                                                     err_text.as_str(),
                                                 )
                                                 .unwrap_or(30_000)
-                                                .clamp(1_000, 300_000);
+                                                .clamp(5_000, 300_000);
                                                 let defer_until =
                                                     now_ms_local.saturating_add(retry_ms);
                                                 last_action_ms_by_token_side
@@ -15124,6 +15125,72 @@ async fn main() -> Result<()> {
                                                         "error": err_text.clone()
                                                     }),
                                                 );
+                                            }
+                                            let lower = err_text.to_ascii_lowercase();
+                                            let insufficient_balance = lower
+                                                .contains("not enough balance")
+                                                || lower.contains("allowance")
+                                                || lower.contains("insufficient");
+                                            if insufficient_balance {
+                                                let retry_ms = 30_000_i64;
+                                                let defer_until =
+                                                    now_ms_local.saturating_add(retry_ms);
+                                                last_action_ms_by_token_side
+                                                    .insert(sell_key.clone(), defer_until);
+                                                log_event(
+                                                    "mm_sport_inventory_exit_backoff_balance_allowance",
+                                                    json!({
+                                                        "strategy_id": STRATEGY_ID_MM_SPORT_V1,
+                                                        "condition_id": market.condition_id,
+                                                        "token_id": token_id,
+                                                        "defer_until_ms": defer_until,
+                                                        "retry_ms": retry_ms
+                                                    }),
+                                                );
+                                                if now_ms_local.saturating_sub(
+                                                    last_inventory_reconcile_attempt_ms,
+                                                ) >= 30_000
+                                                {
+                                                    last_inventory_reconcile_attempt_ms =
+                                                        now_ms_local;
+                                                    match tracking_db_for_mm_sport
+                                                        .reconcile_mm_inventory_drift_from_wallet_tables(
+                                                            STRATEGY_ID_MM_SPORT_V1,
+                                                            1.0,
+                                                            64,
+                                                        )
+                                                    {
+                                                        Ok(rows) => {
+                                                            if !rows.is_empty() {
+                                                                let touched_current = rows.iter().any(|row| {
+                                                                    row.condition_id == market.condition_id
+                                                                        && row.token_id == token_id
+                                                                });
+                                                                log_event(
+                                                                    "mm_sport_inventory_reconcile_triggered",
+                                                                    json!({
+                                                                        "strategy_id": STRATEGY_ID_MM_SPORT_V1,
+                                                                        "condition_id": market.condition_id,
+                                                                        "token_id": token_id,
+                                                                        "rows": rows.len(),
+                                                                        "touched_current": touched_current
+                                                                    }),
+                                                                );
+                                                            }
+                                                        }
+                                                        Err(reconcile_err) => {
+                                                            log_event(
+                                                                "mm_sport_inventory_reconcile_failed",
+                                                                json!({
+                                                                    "strategy_id": STRATEGY_ID_MM_SPORT_V1,
+                                                                    "condition_id": market.condition_id,
+                                                                    "token_id": token_id,
+                                                                    "error": reconcile_err.to_string()
+                                                                }),
+                                                            );
+                                                        }
+                                                    }
+                                                }
                                             }
                                             log_event(
                                                 "mm_sport_inventory_exit_place_sell_failed",
@@ -15410,7 +15477,7 @@ async fn main() -> Result<()> {
                                             let retry_ms =
                                                 parse_remaining_ms_from_error(err_text.as_str())
                                                     .unwrap_or(30_000)
-                                                    .clamp(1_000, 300_000);
+                                                    .clamp(5_000, 300_000);
                                             let defer_until = now_ms_local.saturating_add(retry_ms);
                                             last_action_ms_by_token_side
                                                 .insert(buy_key.clone(), defer_until);

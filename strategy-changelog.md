@@ -83,6 +83,7 @@ Older entries may reference env keys that were removed in later commits.
   - runtime loops now parse `remaining_ms=` from metadata errors and defer retries accordingly:
     - `mm_sport_v1` BUY quote submit and inventory-exit SELL submit paths apply per-token-side backoff (`mm_sport_buy_backoff_tick_metadata`, `mm_sport_inventory_exit_backoff_tick_metadata`);
     - `mm_rewards_v1` selected-token prewarm retry and `evsnipe_v1` selected-token prewarm retry now use parsed remaining backoff windows instead of fixed short retries.
+  - `mm_sport_v1` inventory-exit SELL failure handling now applies explicit capacity backoff (`mm_sport_inventory_exit_backoff_balance_allowance`) and periodically triggers local wallet-table drift reconcile (`mm_sport_inventory_reconcile_triggered`) on repeated `not enough balance / allowance` errors to clear stale strategy inventory attribution.
   - affects MM Sport pregame quoting/exits, MM Rewards selected-market prewarm cycles (all enabled modes/timeframes), and EVSnipe refresh prewarm on discovered symbols.
 
 - MM inventory drift reconcile now supports both `mm_rewards_v1` and `mm_sport_v1` via admin + wallet-sync path (`src/trader.rs`, `src/main.rs`, `scripts/wallet_history_sync.py`):
