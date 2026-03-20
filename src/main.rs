@@ -2683,7 +2683,8 @@ async fn main() -> Result<()> {
     }
 
     let startup_cancel_all_enabled = env_bool_named("EVPOLY_STARTUP_CANCEL_ALL_ORDERS", true);
-    let startup_cancel_all_skip_if_mm_rewards = false;
+    let startup_cancel_all_skip_if_mm_rewards =
+        env_bool_named("EVPOLY_STARTUP_CANCEL_ALL_SKIP_IF_MM_REWARDS", true);
     let startup_mm_rewards_enabled = env_bool_named("EVPOLY_STRATEGY_MM_REWARDS_ENABLE", false);
     let mut startup_cancel_all_succeeded = false;
     let mut startup_cancel_all_canceled = 0usize;
@@ -16222,9 +16223,52 @@ async fn main() -> Result<()> {
                                                     "detail": truncate_for_log(err.to_string().as_str(), 300)
                                                 }),
                                             );
+                                            let fallback_selected_by_mode = previous_auto_active
+                                                .iter()
+                                                .map(|(mode, slots)| {
+                                                    (
+                                                        *mode,
+                                                        slots
+                                                            .iter()
+                                                            .map(|slot| slot.candidate.clone())
+                                                            .collect::<Vec<_>>(),
+                                                    )
+                                                })
+                                                .collect::<std::collections::HashMap<_, _>>();
+                                            let fallback_force_include_by_mode =
+                                                previous_force_include_active
+                                                    .iter()
+                                                    .map(|(mode, slots)| {
+                                                        (
+                                                            *mode,
+                                                            slots
+                                                                .iter()
+                                                                .map(|slot| slot.candidate.clone())
+                                                                .collect::<Vec<_>>(),
+                                                        )
+                                                    })
+                                                    .collect::<std::collections::HashMap<_, _>>();
+                                            let fallback_selected_count = fallback_selected_by_mode
+                                                .values()
+                                                .map(|rows| rows.len())
+                                                .sum::<usize>();
+                                            let fallback_force_include_count =
+                                                fallback_force_include_by_mode
+                                                    .values()
+                                                    .map(|rows| rows.len())
+                                                    .sum::<usize>();
+                                            log_event(
+                                                "mm_rewards_auto_selection_hold_last_good",
+                                                json!({
+                                                    "strategy_id": STRATEGY_ID_MM_REWARDS_V1,
+                                                    "market_mode_requested": mm_cfg_for_loop.market_mode.as_str(),
+                                                    "selected_count": fallback_selected_count,
+                                                    "force_include_count": fallback_force_include_count
+                                                }),
+                                            );
                                             (
-                                                std::collections::HashMap::new(),
-                                                std::collections::HashMap::new(),
+                                                fallback_selected_by_mode,
+                                                fallback_force_include_by_mode,
                                             )
                                         }
                                     };

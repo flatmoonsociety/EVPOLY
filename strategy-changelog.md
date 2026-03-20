@@ -77,6 +77,22 @@ Older entries may reference env keys that were removed in later commits.
 
 ### 2026-03-20
 
+- `mm_rewards_v1` restart safety + auto-selection resilience + config-surface alignment (`src/main.rs`, `src/mm/mod.rs`, `.env.example`, `.env.full.example`):
+  - startup cancel-all skip flag is now runtime-configurable and defaults safe for MM rewards restarts:
+    - `EVPOLY_STARTUP_CANCEL_ALL_SKIP_IF_MM_REWARDS` now defaults to `true` in runtime (was effectively hardcoded off).
+    - when MM rewards is enabled and skip flag remains true, startup global cancel-all is skipped so weak-exit SELL continuity can survive restart.
+  - auto/hybrid remote selection no longer fail-closes to empty on remote-alpha errors:
+    - selection path now holds last-good active set for that cycle (`mm_rewards_auto_selection_hold_last_good`) instead of deselecting/canceling all active MM rewards conditions.
+  - several MM rewards runtime knobs are now truly env-backed (previously hardcoded in runtime):
+    - `EVPOLY_MM_RUNTIME_MODE`
+    - `EVPOLY_MM_HARD_DISABLE`
+    - `EVPOLY_MM_POLL_MS`
+    - `EVPOLY_MM_REPRICE_MIN_INTERVAL_MS`
+    - `EVPOLY_MM_WEAK_EXIT_STALE_FALLBACK_ENABLE`
+    - `EVPOLY_MM_COMPETITION_HIGH_FREEZE_ENABLE`
+    - `EVPOLY_MM_SCORING_SPREAD_EXTEND_CENTS`
+  - affects `mm_rewards_v1` across all non-sports MM-selected markets/timeframes/symbols (sports flow remains owned by `mm_sport_v1`).
+
 - `mm_sport_v1` pause semantics were split into entry-fill pause and continuous ratio-block mode (`src/main.rs`, `src/mm/mod.rs`, `.env.example`, `.env.full.example`):
   - pause-on-fill now arms only for inventory-increasing BUY entry fills (DB event path + WS matched-size path).
   - SELL/unwind fills no longer re-arm pause, so inventory exit is not interrupted by the same pause machine.

@@ -559,7 +559,10 @@ impl Default for MmRewardsConfig {
 
 impl MmRewardsConfig {
     pub fn from_env() -> Self {
-        let runtime_mode = MmRuntimeMode::Live;
+        let runtime_mode = std::env::var("EVPOLY_MM_RUNTIME_MODE")
+            .ok()
+            .map(|raw| MmRuntimeMode::from_env(Some(raw)))
+            .unwrap_or(MmRuntimeMode::Live);
         let market_mode = MmMarketMode::from_env(std::env::var("EVPOLY_MM_MARKET_MODE").ok());
         let mut single_market_selectors =
             parse_single_market_selector_list_env("EVPOLY_MM_SINGLE_MARKET_SLUGS");
@@ -587,7 +590,7 @@ impl MmRewardsConfig {
 
         Self {
             enable: env_bool("EVPOLY_STRATEGY_MM_REWARDS_ENABLE", false),
-            hard_disable: false,
+            hard_disable: env_bool("EVPOLY_MM_HARD_DISABLE", false),
             runtime_mode,
             market_mode,
             auto_require_rewards_feed: env_bool("EVPOLY_MM_AUTO_REQUIRE_REWARDS_FEED", true),
@@ -631,9 +634,10 @@ impl MmRewardsConfig {
             event_scope_filter_enable: env_bool("EVPOLY_MM_EVENT_SCOPE_FILTER_ENABLE", true),
             event_fallback_poll_ms: env_u64("EVPOLY_MM_EVENT_FALLBACK_POLL_MS", 1_000)
                 .clamp(50, 30_000),
-            poll_ms: 200,
+            poll_ms: env_u64("EVPOLY_MM_POLL_MS", 200).clamp(50, 30_000),
             quote_ttl_ms: env_u64("EVPOLY_MM_QUOTE_TTL_MS", 20_000).clamp(1_000, 300_000),
-            reprice_min_interval_ms: 120,
+            reprice_min_interval_ms: env_u64("EVPOLY_MM_REPRICE_MIN_INTERVAL_MS", 120)
+                .clamp(50, 60_000),
             requote_min_price_delta_ticks: env_u32("EVPOLY_MM_REQUOTE_MIN_PRICE_DELTA_TICKS", 1)
                 .clamp(1, 20),
             requote_anchor_levels: env_usize("EVPOLY_MM_REQUOTE_ANCHOR_LEVELS", 2).clamp(1, 10),
@@ -792,7 +796,10 @@ impl MmRewardsConfig {
             .clamp(1, 20),
             weak_exit_max_replaces_per_min: env_u32("EVPOLY_MM_WEAK_EXIT_MAX_REPLACES_PER_MIN", 20)
                 .clamp(1, 600),
-            weak_exit_stale_fallback_enable: false,
+            weak_exit_stale_fallback_enable: env_bool(
+                "EVPOLY_MM_WEAK_EXIT_STALE_FALLBACK_ENABLE",
+                false,
+            ),
             weak_exit_stale_fallback_max_age_ms: env_u64(
                 "EVPOLY_MM_WEAK_EXIT_STALE_FALLBACK_MAX_AGE_SEC",
                 120,
@@ -835,7 +842,10 @@ impl MmRewardsConfig {
             .clamp(1.0, 1_000_000.0),
             skew_size_mult_min: env_f64("EVPOLY_MM_SKEW_SIZE_MULT_MIN", 0.35).clamp(0.05, 1.0),
             skew_deepen_levels_max: env_usize("EVPOLY_MM_SKEW_DEEPEN_LEVELS_MAX", 3).clamp(0, 8),
-            competition_high_freeze_enable: false,
+            competition_high_freeze_enable: env_bool(
+                "EVPOLY_MM_COMPETITION_HIGH_FREEZE_ENABLE",
+                false,
+            ),
             competition_level_allowlist: parse_competition_level_allowlist_env(
                 "EVPOLY_MM_COMPETITION_LEVEL_ALLOWLIST",
             ),
@@ -896,7 +906,8 @@ impl MmRewardsConfig {
             ),
             scoring_guard_enable: env_bool("EVPOLY_MM_SCORING_GUARD_ENABLE", true),
             scoring_guard_require_qmin: env_bool("EVPOLY_MM_SCORING_GUARD_REQUIRE_QMIN", true),
-            scoring_spread_extend_cents: 2.0,
+            scoring_spread_extend_cents: env_f64("EVPOLY_MM_SCORING_SPREAD_EXTEND_CENTS", 2.0)
+                .max(0.0),
             stale_reconcile_interval_ms: env_u64("EVPOLY_MM_STALE_RECONCILE_INTERVAL_MS", 2_000)
                 .clamp(200, 60_000),
             stale_reconcile_max_lookups: env_usize("EVPOLY_MM_STALE_RECONCILE_MAX_LOOKUPS", 8)
