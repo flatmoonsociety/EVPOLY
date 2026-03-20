@@ -13334,6 +13334,7 @@ async fn main() -> Result<()> {
                             .list_reconcile_pending_orders_retry(128, 300_000, 172_800)
                         {
                             let mut rearmed = 0_u64;
+                            let mut canceled = 0_u64;
                             for row in rows {
                                 if !row
                                     .strategy_id
@@ -13342,19 +13343,43 @@ async fn main() -> Result<()> {
                                 {
                                     continue;
                                 }
-                                if tracking_db_for_mm_sport
+                                let mut terminal_canceled = false;
+                                if row.order_id.trim().starts_with("0x")
+                                    && !row.order_id.trim().is_empty()
+                                {
+                                    if let Ok(cancel_response) =
+                                        api_for_mm_sport.cancel_order(row.order_id.as_str()).await
+                                    {
+                                        terminal_canceled =
+                                            cancel_response.canceled.iter().any(|id| {
+                                                id.eq_ignore_ascii_case(row.order_id.as_str())
+                                            });
+                                    }
+                                }
+                                if terminal_canceled {
+                                    if tracking_db_for_mm_sport
+                                        .update_pending_order_status(
+                                            row.order_id.as_str(),
+                                            "CANCELED",
+                                        )
+                                        .is_ok()
+                                    {
+                                        canceled = canceled.saturating_add(1);
+                                    }
+                                } else if tracking_db_for_mm_sport
                                     .update_pending_order_status(row.order_id.as_str(), "OPEN")
                                     .is_ok()
                                 {
                                     rearmed = rearmed.saturating_add(1);
                                 }
                             }
-                            if rearmed > 0 {
+                            if rearmed > 0 || canceled > 0 {
                                 log_event(
                                     "mm_sport_reconcile_failed_rearmed",
                                     json!({
                                         "strategy_id": STRATEGY_ID_MM_SPORT_V1,
-                                        "rearmed_count": rearmed
+                                        "rearmed_count": rearmed,
+                                        "canceled_count": canceled
                                     }),
                                 );
                             }

@@ -86,7 +86,7 @@ Older entries may reference env keys that were removed in later commits.
     - `mm_rewards_v1` selected-token prewarm retry and `evsnipe_v1` selected-token prewarm retry now use parsed remaining backoff windows instead of fixed short retries.
   - `mm_sport_v1` inventory-exit SELL failure handling now applies explicit capacity backoff (`mm_sport_inventory_exit_backoff_balance_allowance`) and periodically triggers local wallet-table drift reconcile (`mm_sport_inventory_reconcile_triggered`) on repeated `not enough balance / allowance` errors to clear stale strategy inventory attribution.
   - `mm_sport_v1` now runs an orphan-condition cancel sweep (`mm_sport_orphan_condition_cancel_sweep`): any MM Sport `OPEN` pending rows whose condition drops out of active discovery/fallback scope are explicitly canceled with retry cooldown, preventing lingering past-expiration duplicate quotes on the exchange UI.
-  - MM Sport also rearms aged `RECONCILE_FAILED` rows back to `OPEN` (`mm_sport_reconcile_failed_rearmed`) so they re-enter normal cancel/reconcile flow instead of staying permanently orphaned.
+  - MM Sport also rearms aged `RECONCILE_FAILED` rows with direct cancel-first handling (`mm_sport_reconcile_failed_rearmed`): bot now attempts exchange cancel by order-id, marks `CANCELED` on confirmation, and only falls back to `OPEN` rearm when cancel is unconfirmed.
   - affects MM Sport pregame quoting/exits, MM Rewards selected-market prewarm cycles (all enabled modes/timeframes), and EVSnipe refresh prewarm on discovered symbols.
 
 - MM inventory drift reconcile now supports both `mm_rewards_v1` and `mm_sport_v1` via admin + wallet-sync path (`src/trader.rs`, `src/main.rs`, `scripts/wallet_history_sync.py`):
