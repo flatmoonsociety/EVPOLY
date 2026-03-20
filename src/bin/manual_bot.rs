@@ -2313,6 +2313,19 @@ async fn start_manual_order(
                         stop_reason = "missing_order_id".to_string();
                         break;
                     };
+                    let close_limit_one_shot = matches!(action, ManualOrderAction::Close)
+                        && matches!(mode, ManualOrderMode::Limit);
+                    if close_limit_one_shot {
+                        // For close+limit one-shot mode, leave the submitted maker order resting.
+                        // Do not enter fill reconcile wait/cancel cleanup for this order.
+                        manual_run
+                            .update(|snap| {
+                                snap.submit_success = snap.submit_success.saturating_add(1);
+                            })
+                            .await;
+                        stop_reason = "one_shot_submitted".to_string();
+                        break;
+                    }
 
                     reserved_inflight_shares += submitted_units;
                     last_submit_ms = now_ms;
