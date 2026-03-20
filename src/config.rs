@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 #[command(author, version, about, long_about = None)]
 pub struct Args {
     /// Run in simulation mode (no real trades)
-    /// Default: simulation mode is enabled (true)
-    #[arg(short, long, default_value_t = true)]
+    /// Default: simulation mode is disabled (false)
+    #[arg(short, long, default_value_t = false)]
     pub simulation: bool,
 
     /// Run in production mode (execute real trades)
