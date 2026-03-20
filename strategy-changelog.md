@@ -77,6 +77,12 @@ Older entries may reference env keys that were removed in later commits.
 
 ### 2026-03-20
 
+- `mm_sport_v1` cancel-state reconciliation was hardened to prevent exchange/live vs local/canceled drift (`src/main.rs`, `src/api.rs`):
+  - MM Sport cancel path now requires cancel confirmation from CLOB response (`canceled` contains the specific `order_id`) before writing local `CANCELED`.
+  - when cancel is unconfirmed, MM Sport now falls back to `get_order` terminal reconciliation (`FILLED`/`CANCELED`/`STALE`) and keeps rows active if exchange still reports live.
+  - shared API single-order cancel transport now routes through CLOB batch-cancel endpoint (`cancel_orders([order_id])`) to avoid ambiguous single-cancel responses that could return empty-ID `not_canceled` payloads.
+  - affects MM Sport quote/cancel/requote behavior across sports markets by preventing false local cancels that lead to duplicate live quotes.
+
 - `mm_sport_v1` requote duplicate-order guard + pending-write fail-safe (`src/main.rs`):
   - normal BUY requote and inventory-exit SELL requote now block repost when cancel attempts are unresolved and the old order still remains active in `pending_orders` (new telemetry: `mm_sport_requote_blocked_unresolved_cancel`).
   - MM Sport order placement now fails closed if `pending_orders` upsert fails: runtime immediately attempts exchange cancel for the just-posted order and returns an error instead of continuing with untracked live exposure.

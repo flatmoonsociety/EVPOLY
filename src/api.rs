@@ -4402,7 +4402,9 @@ impl PolymarketApi {
 
         for attempt in 1..=attempts {
             let handle = self.get_or_create_clob_client().await?;
-            match handle.client.cancel_order(order_id).await {
+            // Use batch cancel endpoint even for single-order requests.
+            // CLOB single-order delete can return ambiguous "not found" responses for valid IDs.
+            match handle.client.cancel_orders(&[order_id]).await {
                 Ok(v) => return Ok(v),
                 Err(e) => {
                     let err = anyhow::anyhow!(e.to_string());

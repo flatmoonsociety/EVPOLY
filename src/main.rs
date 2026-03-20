@@ -1232,11 +1232,35 @@ async fn mm_sport_cancel_pending_rows(
         }
         let mut terminal_status: Option<&'static str> = None;
         if mm_sport_is_exchange_order_id(order_id) {
+            let mut cancel_context: Option<String> = None;
             match api.cancel_order(order_id).await {
-                Ok(_) => {
-                    terminal_status = Some("CANCELED");
+                Ok(cancel_response) => {
+                    let cancel_confirmed = cancel_response
+                        .canceled
+                        .iter()
+                        .any(|id| id.eq_ignore_ascii_case(order_id));
+                    if cancel_confirmed {
+                        terminal_status = Some("CANCELED");
+                    } else {
+                        let not_canceled_reason = cancel_response
+                            .not_canceled
+                            .iter()
+                            .find(|(id, _)| id.eq_ignore_ascii_case(order_id))
+                            .map(|(_, reason)| reason.trim())
+                            .filter(|reason| !reason.is_empty())
+                            .unwrap_or("unknown");
+                        cancel_context = Some(format!(
+                            "cancel_unconfirmed not_canceled_reason={}",
+                            not_canceled_reason
+                        ));
+                    }
                 }
-                Err(cancel_err) => match api.get_order(order_id).await {
+                Err(cancel_err) => {
+                    cancel_context = Some(format!("cancel_err={}", cancel_err));
+                }
+            }
+            if terminal_status.is_none() {
+                match api.get_order(order_id).await {
                     Ok(order_status) => {
                         terminal_status = mm_pending_terminal_status(&order_status.status);
                     }
@@ -1246,12 +1270,14 @@ async fn mm_sport_cancel_pending_rows(
                             terminal_status = Some("STALE");
                         } else {
                             warn!(
-                                "MM sport cancel unresolved order_id={} cancel_err={} lookup_err={}",
-                                order_id, cancel_err, lookup_error_text
+                                "MM sport cancel unresolved order_id={} cancel_context={} lookup_err={}",
+                                order_id,
+                                cancel_context.unwrap_or_else(|| "none".to_string()),
+                                lookup_error_text
                             );
                         }
                     }
-                },
+                }
             }
         } else {
             terminal_status = Some("CANCELED");
