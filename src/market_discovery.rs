@@ -106,6 +106,28 @@ pub fn eth_disabled_fallback_market() -> Market {
     }
 }
 
+pub fn btc_disabled_fallback_market() -> Market {
+    Market {
+        condition_id: "dummy_btc_fallback".to_string(),
+        slug: "btc-updown-15m-fallback".to_string(),
+        active: false,
+        closed: true,
+        market_id: None,
+        question: "BTC Trading Disabled".to_string(),
+        description: None,
+        resolution_source: None,
+        end_date: None,
+        end_date_iso: None,
+        end_date_iso_alt: None,
+        game_start_time: None,
+        start_date: None,
+        tokens: None,
+        clob_token_ids: None,
+        outcomes: None,
+        competitive: None,
+    }
+}
+
 pub fn solana_disabled_fallback_market() -> Market {
     Market {
         condition_id: "dummy_solana_fallback".to_string(),

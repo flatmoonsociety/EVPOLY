@@ -283,24 +283,29 @@ impl MarketMonitor {
             *self.eth_market_end_timestamp.lock().await = None;
         }
 
-        // Get BTC market details
-        if let Ok(btc_details) = self.api.get_market(&btc_condition_id).await {
-            for token in &btc_details.tokens {
-                let outcome_upper = token.outcome.to_uppercase();
-                if outcome_upper.contains("UP") || outcome_upper == "1" {
-                    *self.btc_up_token_id.lock().await = Some(token.token_id.clone());
-                    eprintln!("BTC Up token_id: {}", token.token_id);
-                } else if outcome_upper.contains("DOWN") || outcome_upper == "0" {
-                    *self.btc_down_token_id.lock().await = Some(token.token_id.clone());
-                    eprintln!("BTC Down token_id: {}", token.token_id);
+        // Get BTC market details (skip if dummy fallback - no real market)
+        if btc_condition_id != "dummy_btc_fallback" {
+            if let Ok(btc_details) = self.api.get_market(&btc_condition_id).await {
+                for token in &btc_details.tokens {
+                    let outcome_upper = token.outcome.to_uppercase();
+                    if outcome_upper.contains("UP") || outcome_upper == "1" {
+                        *self.btc_up_token_id.lock().await = Some(token.token_id.clone());
+                        eprintln!("BTC Up token_id: {}", token.token_id);
+                    } else if outcome_upper.contains("DOWN") || outcome_upper == "0" {
+                        *self.btc_down_token_id.lock().await = Some(token.token_id.clone());
+                        eprintln!("BTC Down token_id: {}", token.token_id);
+                    }
+                }
+
+                if let Some(end_timestamp) = Self::parse_iso_to_timestamp(&btc_details.end_date_iso)
+                {
+                    *self.btc_market_end_timestamp.lock().await = Some(end_timestamp);
+                } else {
+                    *self.btc_market_end_timestamp.lock().await = None;
                 }
             }
-
-            if let Some(end_timestamp) = Self::parse_iso_to_timestamp(&btc_details.end_date_iso) {
-                *self.btc_market_end_timestamp.lock().await = Some(end_timestamp);
-            } else {
-                *self.btc_market_end_timestamp.lock().await = None;
-            }
+        } else {
+            *self.btc_market_end_timestamp.lock().await = None;
         }
 
         // Get Solana market details (skip if dummy fallback - no real market)

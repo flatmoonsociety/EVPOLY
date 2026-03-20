@@ -342,6 +342,8 @@ pub struct PolymarketApi {
     prewarming_order_metadata: Arc<tokio::sync::Mutex<HashSet<String>>>,
     tick_metadata_retry_after_ms_by_token: Arc<tokio::sync::Mutex<HashMap<String, i64>>>,
     tick_metadata_rl_failures_by_token: Arc<tokio::sync::Mutex<HashMap<String, u32>>>,
+    tick_metadata_retry_after_ms_global: Arc<tokio::sync::Mutex<i64>>,
+    tick_metadata_rl_failures_global: Arc<tokio::sync::Mutex<u32>>,
     order_signer_circuit_state: Arc<tokio::sync::Mutex<OrderSignerCircuitState>>,
     ws_state: Arc<tokio::sync::Mutex<Option<SharedPolymarketWsState>>>,
     ws_enabled: bool,
@@ -377,7 +379,7 @@ impl PolymarketApi {
             .unwrap_or(2)
             .clamp(0, 8);
         let ws_enabled = Self::env_bool("EVPOLY_PM_WS_ENABLE", true);
-        let ws_market_stale_ms = Self::env_i64("EVPOLY_PM_WS_MARKET_STALE_MS", 2_500).max(250);
+        let ws_market_stale_ms = Self::env_i64("EVPOLY_PM_WS_MARKET_STALE_MS", 600).max(250);
         let ws_order_stale_ms = Self::env_i64("EVPOLY_PM_WS_ORDER_STALE_MS", 5_000).max(500);
 
         Self {
@@ -412,6 +414,8 @@ impl PolymarketApi {
                 tokio::sync::Mutex::new(HashMap::new()),
             ),
             tick_metadata_rl_failures_by_token: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            tick_metadata_retry_after_ms_global: Arc::new(tokio::sync::Mutex::new(0)),
+            tick_metadata_rl_failures_global: Arc::new(tokio::sync::Mutex::new(0)),
             order_signer_circuit_state: Arc::new(tokio::sync::Mutex::new(
                 OrderSignerCircuitState::default(),
             )),
@@ -3399,6 +3403,12 @@ impl PolymarketApi {
         token_id: U256,
     ) -> Result<bool> {
         let token_key = token_id.to_string();
+        {
+            let cache = self.prewarmed_order_metadata.lock().await;
+            if cache.contains(token_key.as_str()) {
+                return Ok(true);
+            }
+        }
         let now_ms = chrono::Utc::now().timestamp_millis();
         if let Some(retry_after_ms) = self.tick_metadata_retry_after_ms(token_key.as_str()).await {
             if now_ms < retry_after_ms {
@@ -3439,9 +3449,51 @@ impl PolymarketApi {
             let mut inflight = self.prewarming_order_metadata.lock().await;
             inflight.remove(token_key.as_str());
         }
-        tick_size.context("Failed to prewarm tick_size")?;
-        fee_rate.context("Failed to prewarm fee_rate")?;
-        neg_risk.context("Failed to prewarm neg_risk")?;
+        if let Err(e) = tick_size {
+            let err_anyhow = anyhow::anyhow!(e.to_string());
+            if Self::is_rate_limit_error(&err_anyhow) {
+                let retry_after_ms = self.set_tick_metadata_backoff(token_key.as_str()).await;
+                let remaining_ms =
+                    retry_after_ms.saturating_sub(chrono::Utc::now().timestamp_millis());
+                anyhow::bail!(
+                    "tick metadata prewarm rate-limited token={} remaining_ms={} source=tick_size err={}",
+                    token_key,
+                    remaining_ms.max(0),
+                    err_anyhow
+                );
+            }
+            anyhow::bail!("Failed to prewarm tick_size: {}", e);
+        }
+        if let Err(e) = fee_rate {
+            let err_anyhow = anyhow::anyhow!(e.to_string());
+            if Self::is_rate_limit_error(&err_anyhow) {
+                let retry_after_ms = self.set_tick_metadata_backoff(token_key.as_str()).await;
+                let remaining_ms =
+                    retry_after_ms.saturating_sub(chrono::Utc::now().timestamp_millis());
+                anyhow::bail!(
+                    "tick metadata prewarm rate-limited token={} remaining_ms={} source=fee_rate err={}",
+                    token_key,
+                    remaining_ms.max(0),
+                    err_anyhow
+                );
+            }
+            anyhow::bail!("Failed to prewarm fee_rate: {}", e);
+        }
+        if let Err(e) = neg_risk {
+            let err_anyhow = anyhow::anyhow!(e.to_string());
+            if Self::is_rate_limit_error(&err_anyhow) {
+                let retry_after_ms = self.set_tick_metadata_backoff(token_key.as_str()).await;
+                let remaining_ms =
+                    retry_after_ms.saturating_sub(chrono::Utc::now().timestamp_millis());
+                anyhow::bail!(
+                    "tick metadata prewarm rate-limited token={} remaining_ms={} source=neg_risk err={}",
+                    token_key,
+                    remaining_ms.max(0),
+                    err_anyhow
+                );
+            }
+            anyhow::bail!("Failed to prewarm neg_risk: {}", e);
+        }
         let mut cache = self.prewarmed_order_metadata.lock().await;
         let max_entries = Self::prewarm_token_cache_max();
         if cache.len() >= max_entries {
@@ -3467,15 +3519,31 @@ impl PolymarketApi {
     }
 
     async fn tick_metadata_retry_after_ms(&self, token_id: &str) -> Option<i64> {
-        self.tick_metadata_retry_after_ms_by_token
+        let token_retry_after_ms = self
+            .tick_metadata_retry_after_ms_by_token
             .lock()
             .await
             .get(token_id)
             .copied()
+            .unwrap_or(0);
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let global_retry_after_ms = {
+            let mut global_failures = self.tick_metadata_rl_failures_global.lock().await;
+            let mut global_retry_after = self.tick_metadata_retry_after_ms_global.lock().await;
+            if *global_retry_after <= now_ms {
+                *global_retry_after = 0;
+                *global_failures = 0;
+                0
+            } else {
+                *global_retry_after
+            }
+        };
+        let retry_after_ms = token_retry_after_ms.max(global_retry_after_ms);
+        (retry_after_ms > now_ms).then_some(retry_after_ms)
     }
 
     async fn set_tick_metadata_backoff(&self, token_id: &str) -> i64 {
-        let failures = {
+        let token_failures = {
             let mut guard = self.tick_metadata_rl_failures_by_token.lock().await;
             let next = guard
                 .get(token_id)
@@ -3486,25 +3554,48 @@ impl PolymarketApi {
             guard.insert(token_id.to_string(), next);
             next
         };
-        let shift = failures.saturating_sub(1).min(8);
-        let backoff_ms = TICK_METADATA_RL_BACKOFF_BASE_MS
-            .saturating_mul(1_i64 << shift)
+        let token_shift = token_failures.saturating_sub(1).min(8);
+        let token_backoff_ms = TICK_METADATA_RL_BACKOFF_BASE_MS
+            .saturating_mul(1_i64 << token_shift)
             .clamp(
                 TICK_METADATA_RL_BACKOFF_BASE_MS,
                 TICK_METADATA_RL_BACKOFF_MAX_MS,
             );
-        let retry_after_ms = chrono::Utc::now()
-            .timestamp_millis()
-            .saturating_add(backoff_ms);
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let token_retry_after_ms = now_ms.saturating_add(token_backoff_ms);
         self.tick_metadata_retry_after_ms_by_token
             .lock()
             .await
-            .insert(token_id.to_string(), retry_after_ms);
+            .insert(token_id.to_string(), token_retry_after_ms);
+        let global_failures = {
+            let mut guard = self.tick_metadata_rl_failures_global.lock().await;
+            let next = guard.saturating_add(1).min(32);
+            *guard = next;
+            next
+        };
+        let global_shift = global_failures.saturating_sub(1).min(8);
+        let global_backoff_ms = TICK_METADATA_RL_BACKOFF_BASE_MS
+            .saturating_mul(1_i64 << global_shift)
+            .clamp(
+                TICK_METADATA_RL_BACKOFF_BASE_MS,
+                TICK_METADATA_RL_BACKOFF_MAX_MS,
+            );
+        let global_retry_after_ms = now_ms.saturating_add(global_backoff_ms);
+        {
+            let mut guard = self.tick_metadata_retry_after_ms_global.lock().await;
+            if global_retry_after_ms > *guard {
+                *guard = global_retry_after_ms;
+            }
+        }
         warn!(
-            "Tick metadata backoff set token={} backoff_ms={} failures={}",
-            token_id, backoff_ms, failures
+            "Tick metadata backoff set token={} token_backoff_ms={} token_failures={} global_backoff_ms={} global_failures={}",
+            token_id,
+            token_backoff_ms,
+            token_failures,
+            global_backoff_ms,
+            global_failures
         );
-        retry_after_ms
+        token_retry_after_ms.max(global_retry_after_ms)
     }
 
     async fn clear_tick_metadata_backoff(&self, token_id: &str) {
@@ -4160,13 +4251,27 @@ impl PolymarketApi {
         let prewarm_cache_hit = match self.prewarm_order_metadata(&handle.client, token_id).await {
             Ok(hit) => hit,
             Err(e) => {
+                let err_text = e.to_string();
+                let normalized = err_text.to_ascii_lowercase();
+                let prewarm_blocked = normalized.contains("tick metadata backoff active")
+                    || normalized.contains("tick metadata prewarm rate-limited");
+                if prewarm_blocked {
+                    anyhow::bail!(
+                        "order metadata prewarm blocked token={} side={} price={} size={} err={}",
+                        order.token_id,
+                        order.side,
+                        order.price,
+                        order.size,
+                        err_text
+                    );
+                }
                 warn!(
                     "Order metadata prewarm failed token={} side={} price={} size={} err={}. Continuing with on-demand metadata fetch.",
                     order.token_id,
                     order.side,
                     order.price,
                     order.size,
-                    e
+                    err_text
                 );
                 false
             }
@@ -4402,7 +4507,9 @@ impl PolymarketApi {
 
         for attempt in 1..=attempts {
             let handle = self.get_or_create_clob_client().await?;
-            match handle.client.cancel_order(order_id).await {
+            // Use batch cancel endpoint even for single-order requests.
+            // CLOB single-order delete can return ambiguous "not found" responses for valid IDs.
+            match handle.client.cancel_orders(&[order_id]).await {
                 Ok(v) => return Ok(v),
                 Err(e) => {
                     let err = anyhow::anyhow!(e.to_string());

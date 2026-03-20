@@ -866,13 +866,7 @@ fn manual_price_from_quote(
                 best_ask.or(best_bid)
             }
         }
-        (ManualOrderAction::Close, ManualOrderMode::Limit) => {
-            if post_only {
-                best_ask.or(best_bid)
-            } else {
-                best_bid.or(best_ask)
-            }
-        }
+        (ManualOrderAction::Close, ManualOrderMode::Limit) => best_ask.or(best_bid),
         (ManualOrderAction::Open, ManualOrderMode::Market) => best_ask
             .or(best_bid)
             .map(|p| (p + slip).min(MANUAL_MAX_PRICE)),
@@ -1575,18 +1569,47 @@ async fn start_manual_order(
         .ok()
         .flatten();
     let slippage_cents = request.slippage_cents.unwrap_or(20.0).clamp(0.0, 50.0);
-    let price_hint = manual_price_from_quote(
-        quote_now.as_ref(),
-        action,
-        mode,
-        post_only,
-        request.price,
-        min_price,
-        max_price,
-        slippage_cents,
-        tick_size,
-    )
-    .unwrap_or_else(|| request.price.unwrap_or(max_price));
+    let price_hint = if matches!(action, ManualOrderAction::Open)
+        && matches!(mode, ManualOrderMode::Limit)
+        && request.price.is_none()
+    {
+        let best_bid = quote_now
+            .as_ref()
+            .and_then(|q| q.bid.and_then(|v| f64::try_from(v).ok()))
+            .filter(|v| v.is_finite() && *v > 0.0);
+        let Some(best_bid) = best_bid else {
+            anyhow::bail!(
+                "unable to derive /manual/open limit price from best bid; provide explicit price or wait for quote/orderbook"
+            );
+        };
+        best_bid.clamp(min_price, max_price)
+    } else {
+        match manual_price_from_quote(
+            quote_now.as_ref(),
+            action,
+            mode,
+            post_only,
+            request.price,
+            min_price,
+            max_price,
+            slippage_cents,
+            tick_size,
+        ) {
+            Some(px) => px,
+            None if matches!(action, ManualOrderAction::Close)
+                && matches!(mode, ManualOrderMode::Limit) =>
+            {
+                anyhow::bail!(
+                    "unable to derive /manual/close limit price from best ask; provide explicit price or wait for quote/orderbook"
+                )
+            }
+            None => request
+                .price
+                .filter(|v| v.is_finite() && *v > 0.0)
+                .unwrap_or(max_price)
+                .clamp(min_price, max_price),
+        }
+    };
 
     let (initial_balance_shares, balance_tracking_warning) =
         match token_shares_with_fallback(state.api.as_ref(), token_id.as_str()).await {
@@ -2171,6 +2194,10 @@ async fn start_manual_order(
                             snap.last_error = Some(format!("quote_failed: {e}"));
                         })
                         .await;
+                    if one_shot {
+                        stop_reason = "one_shot_submit_failed".to_string();
+                        break;
+                    }
                     tokio::time::sleep(Duration::from_millis(poll_ms)).await;
                     continue;
                 }
@@ -2186,6 +2213,19 @@ async fn start_manual_order(
                 slippage_cents,
                 tick_size,
             ) else {
+                if one_shot {
+                    manual_run
+                        .update(|snap| {
+                            snap.submit_errors = snap.submit_errors.saturating_add(1);
+                            snap.last_error = Some(
+                                "quote_failed: unable to derive submit price from best quote"
+                                    .to_string(),
+                            );
+                        })
+                        .await;
+                    stop_reason = "one_shot_submit_failed".to_string();
+                    break;
+                }
                 tokio::time::sleep(Duration::from_millis(poll_ms)).await;
                 continue;
             };
@@ -2313,6 +2353,19 @@ async fn start_manual_order(
                         stop_reason = "missing_order_id".to_string();
                         break;
                     };
+                    let resting_limit_one_shot = matches!(mode, ManualOrderMode::Limit)
+                        && matches!(action, ManualOrderAction::Open | ManualOrderAction::Close);
+                    if resting_limit_one_shot {
+                        // For limit one-shot mode (open+limit and close+limit), leave the
+                        // submitted maker order resting and exit without reconcile/cancel cleanup.
+                        manual_run
+                            .update(|snap| {
+                                snap.submit_success = snap.submit_success.saturating_add(1);
+                            })
+                            .await;
+                        stop_reason = "one_shot_submitted".to_string();
+                        break;
+                    }
 
                     reserved_inflight_shares += submitted_units;
                     last_submit_ms = now_ms;

@@ -77,6 +77,80 @@ Older entries may reference env keys that were removed in later commits.
 
 ### 2026-03-20
 
+- Core startup market discovery is now skipped in MM-only runtime mode (`src/main.rs`, `src/market_discovery.rs`, `src/monitor.rs`):
+  - when all core strategies are disabled (`premarket_v1`, `endgame_sweep_v1`, `evcurve_v1`, `sessionband_v1`, `evsnipe_v1`) and at least one MM strategy is enabled (`mm_rewards_v1` and/or `mm_sport_v1`), bot now skips startup BTC/ETH/SOL/XRP discovery and logs `core_discovery_skipped_mm_only`.
+  - MM-only mode now initializes monitor markets with explicit fallback placeholders (`dummy_*_fallback`, including BTC) and skips the legacy 15-minute core period-discovery worker.
+  - startup/current-market metadata prewarm loops are also skipped in MM-only mode so MM runtimes do not keep emitting core crypto discovery noise.
+  - affects MM-only deployments where operator intentionally runs MM strategies without core crypto strategies.
+
+- `mm_sport_v1` quote GTD expiry defaults and per-market sampling were updated for pregame sports MM quoting (`src/main.rs`, `src/mm/mod.rs`, `.env.example`, `.env.full.example`):
+  - default randomized quote expiry window changed from `65s..125s` to `300s..600s`:
+    - `EVPOLY_MM_SPORT_QUOTE_EXPIRY_MIN_SEC=300`
+    - `EVPOLY_MM_SPORT_QUOTE_EXPIRY_MAX_SEC=600`
+  - quote expiry randomization is now condition-scoped (market-scoped), so paired outcomes in the same market share the same sampled TTL window per quote cycle.
+  - affects `mm_sport_v1` pregame sports markets across all discovered symbols/conditions.
+
+- Tick-metadata rate-limit handling was hardened across order submit + prewarm loops (`src/api.rs`, `src/main.rs`):
+  - API prewarm now checks cache before backoff gate and marks tick-metadata backoff on prewarm-side rate limits (`tick_size` / `fee_rate` / `neg_risk`) instead of repeatedly falling through.
+  - tick-metadata backoff now also has a short global guard (in addition to per-token) so cross-token 429 bursts pause metadata fetches platform-wide briefly instead of immediately thrashing new token ids.
+  - main order submit now fails fast when prewarm is explicitly blocked by tick-metadata backoff/rate-limit, avoiding immediate on-demand metadata retries.
+  - runtime loops now parse `remaining_ms=` from metadata errors and defer retries accordingly:
+    - `mm_sport_v1` BUY quote submit and inventory-exit SELL submit paths apply per-token-side backoff (`mm_sport_buy_backoff_tick_metadata`, `mm_sport_inventory_exit_backoff_tick_metadata`);
+    - `mm_rewards_v1` selected-token prewarm retry and `evsnipe_v1` selected-token prewarm retry now use parsed remaining backoff windows instead of fixed short retries.
+  - `mm_sport_v1` inventory-exit SELL failure handling now applies explicit capacity backoff (`mm_sport_inventory_exit_backoff_balance_allowance`) and periodically triggers local wallet-table drift reconcile (`mm_sport_inventory_reconcile_triggered`) on repeated `not enough balance / allowance` errors to clear stale strategy inventory attribution.
+  - `mm_sport_v1` now runs an orphan-condition cancel sweep (`mm_sport_orphan_condition_cancel_sweep`): any MM Sport `OPEN` pending rows whose condition drops out of active discovery/fallback scope are explicitly canceled with retry cooldown, preventing lingering past-expiration duplicate quotes on the exchange UI.
+  - MM Sport also rearms aged `RECONCILE_FAILED` rows with direct cancel-first handling (`mm_sport_reconcile_failed_rearmed`): bot now attempts exchange cancel by order-id, marks `CANCELED` on confirmation, and only falls back to `OPEN` rearm when cancel is unconfirmed.
+  - affects MM Sport pregame quoting/exits, MM Rewards selected-market prewarm cycles (all enabled modes/timeframes), and EVSnipe refresh prewarm on discovered symbols.
+
+- MM inventory drift reconcile now supports both `mm_rewards_v1` and `mm_sport_v1` via admin + wallet-sync path (`src/trader.rs`, `src/main.rs`, `scripts/wallet_history_sync.py`):
+  - admin endpoint `POST /admin/mm/reconcile/inventory` now accepts `strategy_id` (`mm_rewards_v1` default; `mm_sport_v1` supported) and reconciles per strategy against `wallet_positions_live_latest_v1`.
+  - wallet sync worker now calls reconcile for both MM strategies each run and aggregates repaired shares/status so strategy inventory attribution is repaired from live wallet snapshots.
+  - affects MM inventory tracking/repair across all MM rewards and MM sport markets (all symbols/timeframes where those strategies hold inventory).
+
+- `mm_sport_v1` now applies a simple WS bust-flow pause and randomized quote expiry cycle for pregame sports markets (`src/main.rs`, `src/mm/mod.rs`, `src/polymarket_ws.rs`, `.env.example`, `.env.full.example`):
+  - market WS bridge now consumes public `last_trade_price` events and keeps a short per-token market-trade window used by MM Sport bust checks.
+  - MM Sport bust trigger is now explicit (`bust_shares_1s >= 10000` by default over a `1s` window): if triggered at/under bid guard price, bot cancels MM Sport condition quotes and pauses quoting for a random `60s..300s`, then resumes normal ratio/depth re-evaluation.
+  - MM Sport quote submission is now always post-only `GTD` with randomized expiration `65s..125s`; live orders are tracked with expiry and replaced after expiry via normal cancel/requote flow.
+  - new env knobs:
+    - `EVPOLY_MM_SPORT_BUST_WINDOW_MS`
+    - `EVPOLY_MM_SPORT_BUST_SHARES_1S`
+    - `EVPOLY_MM_SPORT_BUST_PAUSE_MIN_SEC`
+    - `EVPOLY_MM_SPORT_BUST_PAUSE_MAX_SEC`
+    - `EVPOLY_MM_SPORT_QUOTE_EXPIRY_MIN_SEC`
+    - `EVPOLY_MM_SPORT_QUOTE_EXPIRY_MAX_SEC`
+
+- `mm_sport_v1` terminal fill persistence is now written atomically during MM Sport-owned reconciliation paths (`src/main.rs`):
+  - when MM Sport sees terminal BUY fills from WS status updates or cancel/get-order reconciliation, it now writes canonical `ENTRY_FILL` (`entry_fill_order:<order_id>`) via `mark_pending_order_filled_with_event` instead of only flipping `pending_orders.status`.
+  - canceled-with-partial-match BUY orders now persist matched units/notional into `trade_events`/`fills_v2`/`positions_v2` through the same atomic fill transition path.
+  - prevents wallet-live MM Sport inventory from drifting out of strategy attribution after terminal reconciliations, so inventory exit logic can see real MM Sport exposure.
+
+- `mm_sport_v1` cancel-state reconciliation was hardened to prevent exchange/live vs local/canceled drift (`src/main.rs`, `src/api.rs`):
+  - MM Sport cancel path now requires cancel confirmation from CLOB response (`canceled` contains the specific `order_id`) before writing local `CANCELED`.
+  - when cancel is unconfirmed, MM Sport now falls back to `get_order` terminal reconciliation (`FILLED`/`CANCELED`/`STALE`) and keeps rows active if exchange still reports live.
+  - shared API single-order cancel transport now routes through CLOB batch-cancel endpoint (`cancel_orders([order_id])`) to avoid ambiguous single-cancel responses that could return empty-ID `not_canceled` payloads.
+  - affects MM Sport quote/cancel/requote behavior across sports markets by preventing false local cancels that lead to duplicate live quotes.
+
+- `mm_sport_v1` requote duplicate-order guard + pending-write fail-safe (`src/main.rs`):
+  - normal BUY requote and inventory-exit SELL requote now block repost when cancel attempts are unresolved and the old order still remains active in `pending_orders` (new telemetry: `mm_sport_requote_blocked_unresolved_cancel`).
+  - MM Sport order placement now fails closed if `pending_orders` upsert fails: runtime immediately attempts exchange cancel for the just-posted order and returns an error instead of continuing with untracked live exposure.
+  - affects `mm_sport_v1` live quoting/exit paths across discovered sports markets by preventing same-side duplicate reposts under cancel/DB race conditions.
+
+- `mm_rewards_v1` restart safety + auto-selection resilience + config-surface alignment (`src/main.rs`, `src/mm/mod.rs`, `.env.example`, `.env.full.example`):
+  - startup cancel-all skip flag is now runtime-configurable and defaults safe for MM rewards restarts:
+    - `EVPOLY_STARTUP_CANCEL_ALL_SKIP_IF_MM_REWARDS` now defaults to `true` in runtime (was effectively hardcoded off).
+    - when MM rewards is enabled and skip flag remains true, startup global cancel-all is skipped so weak-exit SELL continuity can survive restart.
+  - auto/hybrid remote selection no longer fail-closes to empty on remote-alpha errors:
+    - selection path now holds last-good active set for that cycle (`mm_rewards_auto_selection_hold_last_good`) instead of deselecting/canceling all active MM rewards conditions.
+  - several MM rewards runtime knobs are now truly env-backed (previously hardcoded in runtime):
+    - `EVPOLY_MM_RUNTIME_MODE`
+    - `EVPOLY_MM_HARD_DISABLE`
+    - `EVPOLY_MM_POLL_MS`
+    - `EVPOLY_MM_REPRICE_MIN_INTERVAL_MS`
+    - `EVPOLY_MM_WEAK_EXIT_STALE_FALLBACK_ENABLE`
+    - `EVPOLY_MM_COMPETITION_HIGH_FREEZE_ENABLE`
+    - `EVPOLY_MM_SCORING_SPREAD_EXTEND_CENTS`
+  - affects `mm_rewards_v1` across all non-sports MM-selected markets/timeframes/symbols (sports flow remains owned by `mm_sport_v1`).
+
 - `mm_sport_v1` pause semantics were split into entry-fill pause and continuous ratio-block mode (`src/main.rs`, `src/mm/mod.rs`, `.env.example`, `.env.full.example`):
   - pause-on-fill now arms only for inventory-increasing BUY entry fills (DB event path + WS matched-size path).
   - SELL/unwind fills no longer re-arm pause, so inventory exit is not interrupted by the same pause machine.
@@ -100,6 +174,16 @@ Older entries may reference env keys that were removed in later commits.
     - per-order guard tracks `live_shares` and monotonic `ahead_shares` at price level;
     - runtime breach now includes front-ratio (`live / (ahead + live)`) not just visible top-depth ratio.
   - WS subscription scope now refreshes from active markets plus active MM Sport orders so event-driven checks stay scoped to live exposure.
+
+- `mm_sport_v1` inventory pause/exit, queue guard, and cancel reconciliation were tightened for sports pregame markets across all discovered symbols/timeframes (`src/main.rs`, `src/mm/mod.rs`, `src/api.rs`, `src/polymarket_ws.rs`, `.env.example`, `.env.full.example`):
+  - fill pause now gates inventory-only unwind until pause expiry; prestart windows (`T-60m`/`T-5m`) still allow forced exit behavior.
+  - queue-ahead tracking is now strictly non-increasing for a live order; once `ahead_shares` reaches zero it is not reset upward unless the order context changes.
+  - MM Sport cancel helper now marks local pending rows terminal only after successful exchange cancel or terminal reconciliation (`FILLED`/`CANCELED`/`STALE`), avoiding false local safety on cancel errors.
+  - exposure freshness defaults were tightened:
+    - `EVPOLY_PM_WS_MARKET_STALE_MS`: runtime default `2500 -> 600`, env full example `1000 -> 600`.
+    - `EVPOLY_MM_SPORT_WS_STALE_MS`: `2500 -> 600`.
+    - `EVPOLY_MM_SPORT_RATIO_BREACH_CANCEL_COOLDOWN_MS`: `2000 -> 200`.
+  - hardcoded pair baseline gate sizing (`1.2x`) is now env-configurable with `EVPOLY_MM_SPORT_PAIR_BASELINE_QUOTE_SIZE_MULT` (default `1.2`).
 
 - Pending-order reconciliation hardening for MM strategies (`src/tracking_db.rs`):
   - `update_pending_order_status` and `update_pending_order_status_batch_any` no longer downgrade `FILLED` rows to non-filled terminal states.
@@ -2837,3 +2921,23 @@ Older entries may reference env keys that were removed in later commits.
     - `EVPOLY_MM_DUST_SELL_INTER_ORDER_DELAY_MS=1000`
     - `EVPOLY_MM_DUST_SELL_TIMEOUT_SEC=180` (so hourly wallet-sync dust call can finish 20 paced orders without client timeout).
   - Affects: `mm_rewards_v1` hourly dust cleanup pacing/reliability only (no change to market-making quote logic).
+
+### 2026-03-20
+
+- `mm_sport_v1` ratio-breach hard cooldown to stop cancel/requote churn:
+  - Updated `src/main.rs` MM Sport runtime path:
+    - added condition-scoped ratio pause state (`ratio_pause_until_by_condition`).
+    - on ratio breach, strategy now starts a fixed cooldown and suppresses new BUY quoting until cooldown expiry (inventory exit SELL path remains allowed).
+    - cooldown is applied from all ratio breach sources: watchdog pair check, pair planning gate, and per-token runtime ratio gate.
+    - heartbeat telemetry now reports `ratio_paused_markets`.
+  - Updated `src/mm/mod.rs` config:
+    - added `EVPOLY_MM_SPORT_RATIO_PAUSE_SEC` (default `900` seconds).
+  - Updated env templates:
+    - `.env.example` and `.env.full.example` now include `EVPOLY_MM_SPORT_RATIO_PAUSE_SEC=900`.
+  - Affects: `mm_sport_v1` pregame reward markets across all discovered sports conditions in active runtime.
+
+- `mm_rewards_v1` dust-sell default max-notional increased:
+  - Updated `src/trader.rs`:
+    - `EVPOLY_MM_DUST_SELL_MAX_NOTIONAL_USD` default changed from `5` to `20` (still env-overridable).
+  - Updated `.env.full.example` default to `EVPOLY_MM_DUST_SELL_MAX_NOTIONAL_USD=20`.
+  - Affects: `mm_rewards_v1` dust cleanup sizing cap (`/admin/mm/dust-sell` and scheduled dust sweep paths).

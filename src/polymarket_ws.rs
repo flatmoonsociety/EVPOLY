@@ -6,13 +6,13 @@ use futures_util::StreamExt;
 use polymarket_client_sdk::clob::types::{OrderStatusType, Side};
 use polymarket_client_sdk::clob::ws;
 use polymarket_client_sdk::clob::ws::types::response::{
-    BookUpdate, OrderMessage, OrderMessageType, TradeMessage, WsMessage,
+    BookUpdate, LastTradePrice, OrderMessage, OrderMessageType, TradeMessage, WsMessage,
 };
 use polymarket_client_sdk::types::{B256, U256};
 use polymarket_client_sdk::ws::config::Config as WsConnectionConfig;
 use rust_decimal::Decimal;
 use serde_json::json;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Once;
@@ -50,7 +50,7 @@ impl Default for PolymarketWsConfig {
         let refresh_sec = env_u64("EVPOLY_PM_WS_REFRESH_SEC", 30).max(10);
         let backoff_min_sec = env_u64("EVPOLY_PM_WS_BACKOFF_MIN_SEC", 1).max(1);
         let backoff_max_sec = env_u64("EVPOLY_PM_WS_BACKOFF_MAX_SEC", 20).max(backoff_min_sec);
-        let market_stale_ms = env_i64("EVPOLY_PM_WS_MARKET_STALE_MS", 2_500).max(250);
+        let market_stale_ms = env_i64("EVPOLY_PM_WS_MARKET_STALE_MS", 600).max(250);
         let order_stale_ms = env_i64("EVPOLY_PM_WS_ORDER_STALE_MS", 5_000).max(500);
         Self {
             enabled: env_bool("EVPOLY_PM_WS_ENABLE", true),
@@ -137,6 +137,8 @@ pub struct WsTradeSnapshot {
     pub updated_ms: i64,
 }
 
+const WS_MARKET_TRADE_WINDOW_RETENTION_MS: i64 = 30_000;
+
 #[derive(Debug, Clone)]
 pub struct WsOrderStatusSnapshot {
     pub order_id: String,
@@ -155,6 +157,7 @@ pub struct WsOrderStatusSnapshot {
 struct PolymarketWsInner {
     orderbooks: tokio::sync::RwLock<HashMap<String, WsOrderbookSnapshot>>,
     trades: tokio::sync::RwLock<HashMap<String, WsTradeSnapshot>>,
+    market_trades: tokio::sync::RwLock<HashMap<String, VecDeque<WsTradeSnapshot>>>,
     order_statuses: tokio::sync::RwLock<HashMap<String, WsOrderStatusSnapshot>>,
     subscription_scope_targets: StdMutex<HashMap<String, WsSubscriptionScopeTargets>>,
     market_update_notify: tokio::sync::Notify,
@@ -181,6 +184,7 @@ pub fn new_shared_polymarket_ws_state() -> SharedPolymarketWsState {
         inner: Arc::new(PolymarketWsInner {
             orderbooks: tokio::sync::RwLock::new(HashMap::new()),
             trades: tokio::sync::RwLock::new(HashMap::new()),
+            market_trades: tokio::sync::RwLock::new(HashMap::new()),
             order_statuses: tokio::sync::RwLock::new(HashMap::new()),
             subscription_scope_targets: StdMutex::new(HashMap::new()),
             market_update_notify: tokio::sync::Notify::new(),
@@ -333,6 +337,40 @@ impl SharedPolymarketWsState {
         Some(snapshot.clone())
     }
 
+    pub async fn sum_recent_market_trade_size_at_or_below_price(
+        &self,
+        token_id: &str,
+        max_age_ms: i64,
+        max_price: f64,
+    ) -> f64 {
+        if max_age_ms <= 0 || !max_price.is_finite() || max_price <= 0.0 {
+            return 0.0;
+        }
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let window_start_ms = now_ms.saturating_sub(max_age_ms);
+        let map = self.inner.market_trades.read().await;
+        let Some(window) = map.get(token_id) else {
+            return 0.0;
+        };
+        window
+            .iter()
+            .filter(|trade| trade.updated_ms >= window_start_ms)
+            .filter_map(|trade| {
+                let price = f64::try_from(trade.price).ok()?;
+                let size = f64::try_from(trade.size).ok()?;
+                if !price.is_finite()
+                    || !size.is_finite()
+                    || price <= 0.0
+                    || size <= 0.0
+                    || price > max_price + 1e-9
+                {
+                    return None;
+                }
+                Some(size)
+            })
+            .sum::<f64>()
+    }
+
     fn set_market_connected(&self, shard_idx: usize, connected: bool) {
         let mut guard = self
             .inner
@@ -422,7 +460,7 @@ impl SharedPolymarketWsState {
             return self.wait_for_market_update_after(last_seen_ms).await;
         }
         loop {
-            let current = {
+            let orderbook_current = {
                 let map = self.inner.orderbooks.read().await;
                 token_ids
                     .iter()
@@ -430,6 +468,16 @@ impl SharedPolymarketWsState {
                     .max()
                     .unwrap_or(0)
             };
+            let trade_current = {
+                let map = self.inner.market_trades.read().await;
+                token_ids
+                    .iter()
+                    .filter_map(|token_id| map.get(token_id))
+                    .filter_map(|window| window.back().map(|trade| trade.updated_ms))
+                    .max()
+                    .unwrap_or(0)
+            };
+            let current = orderbook_current.max(trade_current);
             if current > last_seen_ms {
                 return current;
             }
@@ -469,6 +517,43 @@ impl SharedPolymarketWsState {
             .write()
             .await
             .insert(token_id, snapshot);
+        self.inner.market_update_notify.notify_waiters();
+    }
+
+    async fn apply_market_trade_update(&self, trade: LastTradePrice) {
+        let updated_ms = trade.timestamp;
+        self.inner
+            .last_market_msg_ms
+            .store(updated_ms, Ordering::Relaxed);
+
+        let price = trade.price;
+        let size = trade.size.unwrap_or(Decimal::ZERO);
+        if price > Decimal::ZERO && size > Decimal::ZERO {
+            let token_id = trade.asset_id.to_string();
+            let snapshot = WsTradeSnapshot {
+                token_id: token_id.clone(),
+                price,
+                size,
+                updated_ms,
+            };
+            self.inner
+                .trades
+                .write()
+                .await
+                .insert(token_id.clone(), snapshot.clone());
+            let mut windows = self.inner.market_trades.write().await;
+            let window = windows.entry(token_id).or_default();
+            window.push_back(snapshot);
+            let min_keep_ms = updated_ms.saturating_sub(WS_MARKET_TRADE_WINDOW_RETENTION_MS);
+            while window
+                .front()
+                .map(|entry| entry.updated_ms < min_keep_ms)
+                .unwrap_or(false)
+            {
+                let _ = window.pop_front();
+            }
+        }
+
         self.inner.market_update_notify.notify_waiters();
     }
 
@@ -612,6 +697,13 @@ impl SharedPolymarketWsState {
         {
             let mut trades = self.inner.trades.write().await;
             trades.retain(|_, v| now_ms.saturating_sub(v.updated_ms) <= prune_after_ms);
+        }
+        {
+            let mut market_trades = self.inner.market_trades.write().await;
+            market_trades.retain(|_, window| {
+                window.retain(|entry| now_ms.saturating_sub(entry.updated_ms) <= prune_after_ms);
+                !window.is_empty()
+            });
         }
     }
 }
@@ -784,12 +876,35 @@ async fn run_market_loop(
             }
         };
 
-        let stream = match client.subscribe_orderbook(asset_ids.clone()) {
+        let book_stream = match client.subscribe_orderbook(asset_ids.clone()) {
             Ok(v) => v,
             Err(e) => {
                 state.set_market_connected(shard_idx, false);
                 log_event(
                     "polymarket_ws_market_subscribe_failed",
+                    json!({
+                        "error": e.to_string(),
+                        "asset_count": asset_ids.len(),
+                        "asset_count_all": asset_ids_all.len(),
+                        "market_count": market_ids.len(),
+                        "market_count_all": market_ids_all.len(),
+                        "tracked_markets": tracked_markets
+                        ,
+                        "shard_idx": shard_idx,
+                        "shard_count": shard_count
+                    }),
+                );
+                sleep(Duration::from_secs(backoff_sec)).await;
+                backoff_sec = (backoff_sec * 2).min(cfg.backoff_max_sec);
+                continue;
+            }
+        };
+        let trade_stream = match client.subscribe_last_trade_price(asset_ids.clone()) {
+            Ok(v) => v,
+            Err(e) => {
+                state.set_market_connected(shard_idx, false);
+                log_event(
+                    "polymarket_ws_market_trade_subscribe_failed",
                     json!({
                         "error": e.to_string(),
                         "asset_count": asset_ids.len(),
@@ -823,7 +938,8 @@ async fn run_market_loop(
             }),
         );
 
-        let mut stream = Box::pin(stream);
+        let mut book_stream = Box::pin(book_stream);
+        let mut trade_stream = Box::pin(trade_stream);
         let mut refresh_interval = tokio::time::interval(Duration::from_secs(cfg.refresh_sec));
         refresh_interval.tick().await;
         let mut refresh_reconnect = false;
@@ -989,7 +1105,7 @@ async fn run_market_loop(
                             }
                     }
                 }
-                next_msg = stream.next() => {
+                next_msg = book_stream.next() => {
                     match next_msg {
                         Some(Ok(book_update)) => {
                             state.apply_book_update(book_update).await;
@@ -1105,6 +1221,36 @@ async fn run_market_loop(
                         None => {
                             log_event(
                                 "polymarket_ws_market_stream_closed",
+                                json!({
+                                    "asset_count": asset_ids.len(),
+                                    "shard_idx": shard_idx,
+                                    "shard_count": shard_count
+                                }),
+                            );
+                            break;
+                        }
+                    }
+                }
+                next_trade = trade_stream.next() => {
+                    match next_trade {
+                        Some(Ok(trade)) => {
+                            state.apply_market_trade_update(trade).await;
+                        }
+                        Some(Err(e)) => {
+                            log_event(
+                                "polymarket_ws_market_trade_stream_error",
+                                json!({
+                                    "error": e.to_string(),
+                                    "asset_count": asset_ids.len(),
+                                    "shard_idx": shard_idx,
+                                    "shard_count": shard_count
+                                }),
+                            );
+                            break;
+                        }
+                        None => {
+                            log_event(
+                                "polymarket_ws_market_trade_stream_closed",
                                 json!({
                                     "asset_count": asset_ids.len(),
                                     "shard_idx": shard_idx,

@@ -38,6 +38,7 @@ MM_RECONCILE_MIN_DRIFT_SHARES = float(
 )
 MM_RECONCILE_LIMIT = int(os.getenv("EVPOLY_MM_INVENTORY_RECONCILE_LIMIT", "256"))
 MM_RECONCILE_TIMEOUT_SEC = 30.0
+MM_RECONCILE_STRATEGIES: Tuple[str, ...] = ("mm_rewards_v1", "mm_sport_v1")
 MM_DUST_SELL_ENABLE = os.getenv("EVPOLY_MM_DUST_SELL_ENABLE", "1").strip().lower() not in {
     "0",
     "false",
@@ -778,12 +779,18 @@ def normalize_limit(value: int) -> int:
     return max(1, min(int(value), 10_000))
 
 
-def try_reconcile_mm_inventory_from_wallet(session: requests.Session) -> Tuple[str, int, float, Optional[str]]:
-    min_drift_shares = normalize_min_drift_shares(MM_RECONCILE_MIN_DRIFT_SHARES)
-    limit = normalize_limit(MM_RECONCILE_LIMIT)
+def try_reconcile_mm_inventory_for_strategy(
+    session: requests.Session,
+    strategy_id: str,
+    min_drift_shares: float,
+    limit: int,
+) -> Tuple[str, int, float, Optional[str]]:
+    normalized_strategy_id = (strategy_id or "").strip().lower()
+    if not normalized_strategy_id:
+        return "error", 0, 0.0, "strategy_id_missing"
     url = (
         f"http://{ADMIN_API_BIND}/admin/mm/reconcile/inventory"
-        f"?min_drift_shares={min_drift_shares}&limit={limit}"
+        f"?strategy_id={normalized_strategy_id}&min_drift_shares={min_drift_shares}&limit={limit}"
     )
     headers: Dict[str, str] = {}
     if ADMIN_API_TOKEN:
@@ -804,6 +811,26 @@ def try_reconcile_mm_inventory_from_wallet(session: requests.Session) -> Tuple[s
         return "ok", count, repaired, None
     except Exception as e:
         return "error", 0, 0.0, f"{type(e).__name__}: {e}"
+
+
+def try_reconcile_mm_inventory_from_wallet(session: requests.Session) -> Tuple[str, int, float, Optional[str]]:
+    min_drift_shares = normalize_min_drift_shares(MM_RECONCILE_MIN_DRIFT_SHARES)
+    limit = normalize_limit(MM_RECONCILE_LIMIT)
+    total_rows = 0
+    total_repaired = 0.0
+    errors: List[str] = []
+    for strategy_id in MM_RECONCILE_STRATEGIES:
+        status, rows, repaired, error = try_reconcile_mm_inventory_for_strategy(
+            session, strategy_id, min_drift_shares, limit
+        )
+        total_rows += rows
+        total_repaired += repaired
+        if status != "ok":
+            errors.append(f"{strategy_id}: {error or status}")
+    if not errors:
+        return "ok", total_rows, total_repaired, None
+    overall_status = "error" if len(errors) == len(MM_RECONCILE_STRATEGIES) else "partial"
+    return overall_status, total_rows, total_repaired, " | ".join(errors)
 
 
 def normalize_dust_notional(value: float) -> float:

@@ -9998,7 +9998,7 @@ impl Trader {
         std::env::var("EVPOLY_MM_DUST_SELL_MAX_NOTIONAL_USD")
             .ok()
             .and_then(|v| v.parse::<f64>().ok())
-            .unwrap_or(5.0)
+            .unwrap_or(20.0)
             .clamp(0.10, 1_000.0)
     }
 
@@ -10669,26 +10669,38 @@ impl Trader {
         Self::current_merge_sweep_status_json()
     }
 
-    pub fn reconcile_mm_inventory_from_wallet_tables(
+    pub fn reconcile_strategy_inventory_from_wallet_tables(
         &self,
+        strategy_id: &str,
         min_drift_shares: Option<f64>,
         limit: Option<usize>,
     ) -> Result<Value> {
         let Some(db) = self.tracking_db.as_ref() else {
             return Err(anyhow!("tracking_db_unavailable"));
         };
+        let strategy_id_normalized = strategy_id.trim().to_ascii_lowercase();
+        if strategy_id_normalized != crate::strategy::STRATEGY_ID_MM_REWARDS_V1
+            && strategy_id_normalized != crate::strategy::STRATEGY_ID_MM_SPORT_V1
+        {
+            return Err(anyhow!(
+                "unsupported_strategy_id: {} (allowed: {}, {})",
+                strategy_id,
+                crate::strategy::STRATEGY_ID_MM_REWARDS_V1,
+                crate::strategy::STRATEGY_ID_MM_SPORT_V1
+            ));
+        }
         let min_drift_shares = min_drift_shares
             .filter(|v| v.is_finite() && *v > 0.0)
             .unwrap_or(1.0);
         let limit = limit.unwrap_or(256).clamp(1, 10_000);
         let rows = db.reconcile_mm_inventory_drift_from_wallet_tables(
-            crate::strategy::STRATEGY_ID_MM_REWARDS_V1,
+            strategy_id_normalized.as_str(),
             min_drift_shares,
             limit,
         )?;
         Ok(json!({
             "ok": true,
-            "strategy_id": crate::strategy::STRATEGY_ID_MM_REWARDS_V1,
+            "strategy_id": strategy_id_normalized,
             "min_drift_shares": min_drift_shares,
             "count": rows.len(),
             "rows": rows.into_iter().map(|row| {
@@ -10715,6 +10727,18 @@ impl Trader {
                 })
             }).collect::<Vec<_>>()
         }))
+    }
+
+    pub fn reconcile_mm_inventory_from_wallet_tables(
+        &self,
+        min_drift_shares: Option<f64>,
+        limit: Option<usize>,
+    ) -> Result<Value> {
+        self.reconcile_strategy_inventory_from_wallet_tables(
+            crate::strategy::STRATEGY_ID_MM_REWARDS_V1,
+            min_drift_shares,
+            limit,
+        )
     }
 
     pub async fn dust_sell_mm_inventory(
