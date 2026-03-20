@@ -931,6 +931,31 @@ fn parse_rfc3339_to_ts_ms(value: &str) -> Option<i64> {
     None
 }
 
+fn parse_remaining_ms_from_error(err_text: &str) -> Option<i64> {
+    let marker = "remaining_ms=";
+    let start_idx = err_text.find(marker)?.saturating_add(marker.len());
+    let mut raw_value = String::new();
+    for ch in err_text[start_idx..].chars() {
+        if ch.is_ascii_digit() || (raw_value.is_empty() && ch == '-') {
+            raw_value.push(ch);
+        } else {
+            break;
+        }
+    }
+    if raw_value.is_empty() || raw_value == "-" {
+        return None;
+    }
+    raw_value.parse::<i64>().ok().map(|value| value.max(0))
+}
+
+fn tick_metadata_backoff_error(err_text: &str) -> bool {
+    let lower = err_text.to_ascii_lowercase();
+    lower.contains("tick metadata backoff active")
+        || lower.contains("tick metadata prewarm rate-limited")
+        || lower.contains("tick metadata build rate-limited")
+        || (lower.contains("order metadata prewarm blocked") && lower.contains("tick metadata"))
+}
+
 fn mm_sport_prestart_exit_mode(now_ms: i64, game_start_ts_ms: i64) -> bool {
     game_start_ts_ms > 0
         && now_ms >= game_start_ts_ms.saturating_sub(60 * 60 * 1_000)
@@ -12278,13 +12303,16 @@ async fn main() -> Result<()> {
                                 }
                                 Err(e) => {
                                     let err_text = e.to_string();
-                                    let retry_ms =
-                                        if err_text.to_ascii_lowercase().contains("backoff active")
-                                        {
-                                            5_000_i64
-                                        } else {
-                                            evsnipe_selected_token_prewarm_cooldown_ms
-                                        };
+                                    let lower = err_text.to_ascii_lowercase();
+                                    let metadata_backoff = lower.contains("backoff active")
+                                        || lower.contains("rate-limited");
+                                    let retry_ms = if metadata_backoff {
+                                        parse_remaining_ms_from_error(err_text.as_str())
+                                            .unwrap_or(evsnipe_selected_token_prewarm_cooldown_ms)
+                                            .clamp(5_000, 300_000)
+                                    } else {
+                                        evsnipe_selected_token_prewarm_cooldown_ms
+                                    };
                                     evsnipe_selected_token_prewarm_retry_after_ms
                                         .insert(token_id.clone(), now_ms.saturating_add(retry_ms));
                                     evsnipe_prewarm_failures =
@@ -15074,6 +15102,29 @@ async fn main() -> Result<()> {
                                         }
                                         Ok(None) => {}
                                         Err(e) => {
+                                            let err_text = e.to_string();
+                                            if tick_metadata_backoff_error(err_text.as_str()) {
+                                                let retry_ms = parse_remaining_ms_from_error(
+                                                    err_text.as_str(),
+                                                )
+                                                .unwrap_or(30_000)
+                                                .clamp(1_000, 300_000);
+                                                let defer_until =
+                                                    now_ms_local.saturating_add(retry_ms);
+                                                last_action_ms_by_token_side
+                                                    .insert(sell_key.clone(), defer_until);
+                                                log_event(
+                                                    "mm_sport_inventory_exit_backoff_tick_metadata",
+                                                    json!({
+                                                        "strategy_id": STRATEGY_ID_MM_SPORT_V1,
+                                                        "condition_id": market.condition_id,
+                                                        "token_id": token_id,
+                                                        "defer_until_ms": defer_until,
+                                                        "retry_ms": retry_ms,
+                                                        "error": err_text.clone()
+                                                    }),
+                                                );
+                                            }
                                             log_event(
                                                 "mm_sport_inventory_exit_place_sell_failed",
                                                 json!({
@@ -15083,7 +15134,7 @@ async fn main() -> Result<()> {
                                                     "price": submit_exit_price,
                                                     "size_shares": desired_exit_shares,
                                                     "force_exit_mode": force_exit_mode,
-                                                    "error": e.to_string()
+                                                    "error": err_text
                                                 }),
                                             );
                                         }
@@ -15355,6 +15406,26 @@ async fn main() -> Result<()> {
                                     Ok(None) => {}
                                     Err(e) => {
                                         let err_text = e.to_string();
+                                        if tick_metadata_backoff_error(err_text.as_str()) {
+                                            let retry_ms =
+                                                parse_remaining_ms_from_error(err_text.as_str())
+                                                    .unwrap_or(30_000)
+                                                    .clamp(1_000, 300_000);
+                                            let defer_until = now_ms_local.saturating_add(retry_ms);
+                                            last_action_ms_by_token_side
+                                                .insert(buy_key.clone(), defer_until);
+                                            log_event(
+                                                "mm_sport_buy_backoff_tick_metadata",
+                                                json!({
+                                                    "strategy_id": STRATEGY_ID_MM_SPORT_V1,
+                                                    "condition_id": market.condition_id,
+                                                    "token_id": token_id,
+                                                    "defer_until_ms": defer_until,
+                                                    "retry_ms": retry_ms,
+                                                    "error": err_text.clone()
+                                                }),
+                                            );
+                                        }
                                         let lower = err_text.to_ascii_lowercase();
                                         let insufficient_balance = lower
                                             .contains("not enough balance")
@@ -18198,13 +18269,16 @@ async fn main() -> Result<()> {
                                 }
                                 Err(e) => {
                                     let err_text = e.to_string();
-                                    let retry_ms =
-                                        if err_text.to_ascii_lowercase().contains("backoff active")
-                                        {
-                                            5_000_i64
-                                        } else {
-                                            mm_selected_token_prewarm_cooldown_ms
-                                        };
+                                    let lower = err_text.to_ascii_lowercase();
+                                    let metadata_backoff = lower.contains("backoff active")
+                                        || lower.contains("rate-limited");
+                                    let retry_ms = if metadata_backoff {
+                                        parse_remaining_ms_from_error(err_text.as_str())
+                                            .unwrap_or(mm_selected_token_prewarm_cooldown_ms)
+                                            .clamp(5_000, 300_000)
+                                    } else {
+                                        mm_selected_token_prewarm_cooldown_ms
+                                    };
                                     mm_selected_token_prewarm_retry_after_ms.insert(
                                         token_id.to_string(),
                                         now_ms.saturating_add(retry_ms),

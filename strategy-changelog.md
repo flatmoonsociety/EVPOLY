@@ -77,6 +77,14 @@ Older entries may reference env keys that were removed in later commits.
 
 ### 2026-03-20
 
+- Tick-metadata rate-limit handling was hardened across order submit + prewarm loops (`src/api.rs`, `src/main.rs`):
+  - API prewarm now checks cache before backoff gate and marks tick-metadata backoff on prewarm-side rate limits (`tick_size` / `fee_rate` / `neg_risk`) instead of repeatedly falling through.
+  - main order submit now fails fast when prewarm is explicitly blocked by tick-metadata backoff/rate-limit, avoiding immediate on-demand metadata retries.
+  - runtime loops now parse `remaining_ms=` from metadata errors and defer retries accordingly:
+    - `mm_sport_v1` BUY quote submit and inventory-exit SELL submit paths apply per-token-side backoff (`mm_sport_buy_backoff_tick_metadata`, `mm_sport_inventory_exit_backoff_tick_metadata`);
+    - `mm_rewards_v1` selected-token prewarm retry and `evsnipe_v1` selected-token prewarm retry now use parsed remaining backoff windows instead of fixed short retries.
+  - affects MM Sport pregame quoting/exits, MM Rewards selected-market prewarm cycles (all enabled modes/timeframes), and EVSnipe refresh prewarm on discovered symbols.
+
 - MM inventory drift reconcile now supports both `mm_rewards_v1` and `mm_sport_v1` via admin + wallet-sync path (`src/trader.rs`, `src/main.rs`, `scripts/wallet_history_sync.py`):
   - admin endpoint `POST /admin/mm/reconcile/inventory` now accepts `strategy_id` (`mm_rewards_v1` default; `mm_sport_v1` supported) and reconciles per strategy against `wallet_positions_live_latest_v1`.
   - wallet sync worker now calls reconcile for both MM strategies each run and aggregates repaired shares/status so strategy inventory attribution is repaired from live wallet snapshots.
