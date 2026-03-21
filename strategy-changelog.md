@@ -77,6 +77,12 @@ Older entries may reference env keys that were removed in later commits.
 
 ### 2026-03-21
 
+- `mm_sport_v1` urgent depth-ratio BUY-cap fallback hotfix (`src/main.rs`):
+  - fixed depth-ratio cap behavior so `allowance_usd <= 0` no longer hard-zeroes BUY quoting when `balance_usd > 0`; effective available USDC now falls back to balance in this specific stale/invalid allowance case, while preserving the existing 50% cap.
+  - added throttled fallback telemetry: `mm_sport_depth_ratio_allowance_zero_fallback` (`strategy_id`, `balance_usd`, `allowance_usd`, `chosen_available_usdc`).
+  - added explicit zero-size skip telemetry for depth-ratio BUY path: `mm_sport_depth_ratio_zero_bid_skip` before skip/continue.
+  - affects `mm_sport_v1` only, in `EVPOLY_MM_SPORT_QUOTE_SIZE_MODE=depth_ratio`, across all active sports conditions/timeframes/symbols discovered by MM Sport; `mm_rewards_v1` logic unchanged.
+
 - Shared symbol ownership + discovery/log hardening sweep (`src/symbol_ownership.rs`, `src/main.rs`, `src/evcurve.rs`, `src/sessionband.rs`, `src/polymarket_ws.rs`, `src/api.rs`, `src/trader.rs`, `.env.example`, `.env.full.example`):
   - symbol ownership is now centralized: `DOGE/BNB/HYPE` are restricted to `endgame_sweep_v1` and `evsnipe_v1`; `evcurve_v1` and `sessionband_v1` bootstraps now filter those symbols out even if provided via env.
   - Coinbase routing hard rule enforced: `coinbase_product_id_for_market_symbol("DOGE")` now returns no mapping; no `DOGE-USD` Coinbase feed spawn path remains.
