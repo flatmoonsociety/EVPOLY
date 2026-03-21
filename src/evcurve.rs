@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use crate::plan3_tables::{Plan3LookupResult, Plan3Tables};
 use crate::plandaily_tables::{PlanDailyLookupResult, PlanDailyTables};
 use crate::size_policy;
-use crate::strategy::{Direction, Timeframe};
+use crate::strategy::{Direction, Timeframe, STRATEGY_ID_EVCURVE_V1};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HoldSide {
@@ -142,10 +142,7 @@ pub struct EvcurveExecutionConfig {
 
 impl EvcurveExecutionConfig {
     pub fn from_env() -> Self {
-        let symbols = parse_symbols_env(
-            "EVPOLY_EVCURVE_SYMBOLS",
-            &["BTC", "ETH", "SOL", "XRP", "DOGE", "BNB", "HYPE"],
-        );
+        let symbols = parse_symbols_env("EVPOLY_EVCURVE_SYMBOLS", &["BTC", "ETH", "SOL", "XRP"]);
         let mut timeframes = parse_timeframes_env(
             "EVPOLY_EVCURVE_TIMEFRAMES",
             &[Timeframe::M15, Timeframe::H1, Timeframe::H4, Timeframe::D1],
@@ -1005,17 +1002,15 @@ fn parse_symbols_env(key: &str, defaults: &[&str]) -> Vec<String> {
     let parsed = std::env::var(key)
         .ok()
         .map(|raw| {
-            raw.split(',')
-                .map(normalize_symbol)
-                .filter(|v| !v.is_empty())
-                .collect::<Vec<_>>()
+            crate::symbol_ownership::parse_symbols_csv_for_strategy(STRATEGY_ID_EVCURVE_V1, &raw)
         })
         .unwrap_or_default();
     if parsed.is_empty() {
-        defaults
+        let defaults = defaults
             .iter()
             .map(|v| normalize_symbol(v))
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>();
+        crate::symbol_ownership::filter_symbols_for_strategy(STRATEGY_ID_EVCURVE_V1, &defaults)
     } else {
         parsed
     }

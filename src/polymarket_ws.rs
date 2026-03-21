@@ -47,7 +47,7 @@ pub struct PolymarketWsConfig {
 
 impl Default for PolymarketWsConfig {
     fn default() -> Self {
-        let refresh_sec = env_u64("EVPOLY_PM_WS_REFRESH_SEC", 30).max(10);
+        let refresh_sec = env_u64("EVPOLY_PM_WS_REFRESH_SEC", 90).max(10);
         let backoff_min_sec = env_u64("EVPOLY_PM_WS_BACKOFF_MIN_SEC", 1).max(1);
         let backoff_max_sec = env_u64("EVPOLY_PM_WS_BACKOFF_MAX_SEC", 20).max(backoff_min_sec);
         let market_stale_ms = env_i64("EVPOLY_PM_WS_MARKET_STALE_MS", 600).max(250);
@@ -62,7 +62,7 @@ impl Default for PolymarketWsConfig {
             refresh_sec,
             backoff_min_sec,
             backoff_max_sec,
-            market_discovery_limit: env_u64("EVPOLY_PM_WS_MARKET_DISCOVERY_LIMIT", 1_500)
+            market_discovery_limit: env_u64("EVPOLY_PM_WS_MARKET_DISCOVERY_LIMIT", 250)
                 .clamp(50, 5_000) as u32,
             market_stale_ms,
             order_stale_ms,
@@ -177,6 +177,82 @@ pub struct SharedPolymarketWsState {
 struct WsSubscriptionScopeTargets {
     asset_ids: Vec<U256>,
     market_ids: Vec<B256>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct DegradedLogState {
+    active: bool,
+    since_ms: i64,
+    last_heartbeat_ms: i64,
+    event_count: u64,
+    last_reason: String,
+}
+
+impl DegradedLogState {
+    fn mark_degraded(
+        &mut self,
+        transition_event: &str,
+        heartbeat_event: &str,
+        reason: &str,
+        mut payload: serde_json::Value,
+    ) {
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        self.event_count = self.event_count.saturating_add(1);
+        if !self.active {
+            self.active = true;
+            self.since_ms = now_ms;
+            self.last_heartbeat_ms = now_ms;
+            self.last_reason = reason.to_string();
+            if let Some(obj) = payload.as_object_mut() {
+                obj.insert("reason".to_string(), json!(reason));
+                obj.insert("degraded_since_ms".to_string(), json!(self.since_ms));
+                obj.insert("event_count".to_string(), json!(self.event_count));
+            }
+            log_event(transition_event, payload);
+            return;
+        }
+
+        self.last_reason = reason.to_string();
+        if now_ms.saturating_sub(self.last_heartbeat_ms) >= 60_000 {
+            self.last_heartbeat_ms = now_ms;
+            if let Some(obj) = payload.as_object_mut() {
+                obj.insert("reason".to_string(), json!(self.last_reason));
+                obj.insert("degraded_since_ms".to_string(), json!(self.since_ms));
+                obj.insert(
+                    "degraded_duration_ms".to_string(),
+                    json!(now_ms.saturating_sub(self.since_ms)),
+                );
+                obj.insert("event_count".to_string(), json!(self.event_count));
+            }
+            log_event(heartbeat_event, payload);
+        }
+    }
+
+    fn mark_recovered(&mut self, recovery_event: &str, mut payload: serde_json::Value) {
+        if !self.active {
+            return;
+        }
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        if let Some(obj) = payload.as_object_mut() {
+            obj.insert("degraded_since_ms".to_string(), json!(self.since_ms));
+            obj.insert(
+                "degraded_duration_ms".to_string(),
+                json!(now_ms.saturating_sub(self.since_ms)),
+            );
+            obj.insert("degraded_event_count".to_string(), json!(self.event_count));
+            obj.insert("last_reason".to_string(), json!(self.last_reason.clone()));
+        }
+        log_event(recovery_event, payload);
+        *self = Self::default();
+    }
+}
+
+fn discovery_backoff_sec(streak: u32) -> u64 {
+    match streak {
+        0 | 1 => 90,
+        2 => 180,
+        _ => 300,
+    }
 }
 
 pub fn new_shared_polymarket_ws_state() -> SharedPolymarketWsState {
@@ -801,45 +877,88 @@ async fn run_market_loop(
     let mut backoff_sec = cfg.backoff_min_sec;
     let mut last_lag_reconnect_ms = 0_i64;
     let mut last_discovered_targets: Option<(Vec<U256>, Vec<B256>, usize)> = None;
+    let mut discovery_failure_streak = 0_u32;
+    let mut discovery_retry_after_ms = 0_i64;
+    let mut discovery_log_state = DegradedLogState::default();
+    let mut stream_log_state = DegradedLogState::default();
     loop {
-        let (asset_ids_all, market_ids_all, tracked_markets) =
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let (asset_ids_all, market_ids_all, tracked_markets) = if now_ms < discovery_retry_after_ms
+        {
+            if let Some(cached) = last_discovered_targets.clone() {
+                cached
+            } else {
+                let wait_ms = discovery_retry_after_ms.saturating_sub(now_ms).max(1_000);
+                sleep(Duration::from_millis(wait_ms as u64)).await;
+                continue;
+            }
+        } else {
             match discover_subscription_targets(api.as_ref(), &state, cfg.market_discovery_limit)
                 .await
             {
                 Ok(v) => {
                     last_discovered_targets = Some(v.clone());
+                    discovery_failure_streak = 0;
+                    discovery_retry_after_ms = 0;
+                    discovery_log_state.mark_recovered(
+                        "polymarket_ws_market_discovery_recovered",
+                        json!({
+                            "shard_idx": shard_idx,
+                            "shard_count": shard_count,
+                            "asset_count": v.0.len(),
+                            "market_count": v.1.len(),
+                            "tracked_markets": v.2
+                        }),
+                    );
                     v
                 }
                 Err(e) => {
+                    discovery_failure_streak = discovery_failure_streak.saturating_add(1);
+                    let discovery_wait_sec = discovery_backoff_sec(discovery_failure_streak);
+                    discovery_retry_after_ms = now_ms.saturating_add(
+                        i64::try_from(discovery_wait_sec.saturating_mul(1_000))
+                            .ok()
+                            .unwrap_or(300_000),
+                    );
                     if let Some((cached_assets, cached_markets, cached_tracked)) =
                         last_discovered_targets.clone()
                     {
-                        log_event(
-                            "polymarket_ws_market_discovery_failed_using_cache",
+                        discovery_log_state.mark_degraded(
+                            "polymarket_ws_market_discovery_degraded",
+                            "polymarket_ws_market_discovery_degraded_heartbeat",
+                            "discovery_failed_using_cache",
                             json!({
                                 "error": e.to_string(),
+                                "shard_idx": shard_idx,
+                                "shard_count": shard_count,
                                 "cached_asset_count": cached_assets.len(),
                                 "cached_market_count": cached_markets.len(),
                                 "cached_tracked_markets": cached_tracked,
-                                "shard_idx": shard_idx,
-                                "shard_count": shard_count
+                                "discovery_failure_streak": discovery_failure_streak,
+                                "next_discovery_wait_sec": discovery_wait_sec
                             }),
                         );
                         (cached_assets, cached_markets, cached_tracked)
                     } else {
                         state.set_market_connected(shard_idx, false);
-                        log_event(
-                            "polymarket_ws_market_discovery_failed",
+                        discovery_log_state.mark_degraded(
+                            "polymarket_ws_market_discovery_degraded",
+                            "polymarket_ws_market_discovery_degraded_heartbeat",
+                            "discovery_failed_no_cache",
                             json!({
-                                "error": e.to_string()
+                                "error": e.to_string(),
+                                "shard_idx": shard_idx,
+                                "shard_count": shard_count,
+                                "discovery_failure_streak": discovery_failure_streak,
+                                "next_discovery_wait_sec": discovery_wait_sec
                             }),
                         );
-                        sleep(Duration::from_secs(backoff_sec)).await;
-                        backoff_sec = (backoff_sec * 2).min(cfg.backoff_max_sec);
+                        sleep(Duration::from_secs(discovery_wait_sec)).await;
                         continue;
                     }
                 }
-            };
+            }
+        };
         let asset_ids = shard_vec(asset_ids_all.as_slice(), shard_idx, shard_count);
         let market_ids = shard_vec(market_ids_all.as_slice(), shard_idx, shard_count);
 
@@ -924,6 +1043,15 @@ async fn run_market_loop(
         };
 
         state.set_market_connected(shard_idx, true);
+        stream_log_state.mark_recovered(
+            "polymarket_ws_market_stream_recovered",
+            json!({
+                "shard_idx": shard_idx,
+                "shard_count": shard_count,
+                "asset_count": asset_ids.len(),
+                "market_count": market_ids.len()
+            }),
+        );
         log_event(
             "polymarket_ws_market_subscribed",
             json!({
@@ -1207,8 +1335,10 @@ async fn run_market_loop(
                                 }
                                 last_lag_reconnect_ms = now_ms;
                             }
-                            log_event(
-                                "polymarket_ws_market_stream_error",
+                            stream_log_state.mark_degraded(
+                                "polymarket_ws_market_stream_degraded",
+                                "polymarket_ws_market_stream_degraded_heartbeat",
+                                "book_stream_error",
                                 json!({
                                     "error": err_text,
                                     "asset_count": asset_ids.len(),
@@ -1219,8 +1349,10 @@ async fn run_market_loop(
                             break;
                         }
                         None => {
-                            log_event(
-                                "polymarket_ws_market_stream_closed",
+                            stream_log_state.mark_degraded(
+                                "polymarket_ws_market_stream_degraded",
+                                "polymarket_ws_market_stream_degraded_heartbeat",
+                                "book_stream_closed",
                                 json!({
                                     "asset_count": asset_ids.len(),
                                     "shard_idx": shard_idx,
@@ -1237,8 +1369,10 @@ async fn run_market_loop(
                             state.apply_market_trade_update(trade).await;
                         }
                         Some(Err(e)) => {
-                            log_event(
-                                "polymarket_ws_market_trade_stream_error",
+                            stream_log_state.mark_degraded(
+                                "polymarket_ws_market_stream_degraded",
+                                "polymarket_ws_market_stream_degraded_heartbeat",
+                                "trade_stream_error",
                                 json!({
                                     "error": e.to_string(),
                                     "asset_count": asset_ids.len(),
@@ -1249,8 +1383,10 @@ async fn run_market_loop(
                             break;
                         }
                         None => {
-                            log_event(
-                                "polymarket_ws_market_trade_stream_closed",
+                            stream_log_state.mark_degraded(
+                                "polymarket_ws_market_stream_degraded",
+                                "polymarket_ws_market_stream_degraded_heartbeat",
+                                "trade_stream_closed",
                                 json!({
                                     "asset_count": asset_ids.len(),
                                     "shard_idx": shard_idx,
@@ -1318,8 +1454,10 @@ async fn run_market_loop(
                 0_u64
             };
 
-            log_event(
-                "polymarket_ws_market_reconnect_backoff",
+            stream_log_state.mark_degraded(
+                "polymarket_ws_market_stream_degraded",
+                "polymarket_ws_market_stream_degraded_heartbeat",
+                "reconnect_backoff",
                 json!({
                     "shard_idx": shard_idx,
                     "shard_count": shard_count,
@@ -1341,40 +1479,77 @@ async fn run_user_loop(
 ) {
     let mut backoff_sec = cfg.backoff_min_sec;
     let mut last_market_targets: Option<(Vec<B256>, usize)> = None;
+    let mut discovery_failure_streak = 0_u32;
+    let mut discovery_retry_after_ms = 0_i64;
+    let mut discovery_log_state = DegradedLogState::default();
+    let mut user_stream_log_state = DegradedLogState::default();
     loop {
-        let (_, market_ids, tracked_markets) =
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let (_, market_ids, tracked_markets) = if now_ms < discovery_retry_after_ms {
+            if let Some((cached_market_ids, cached_tracked)) = last_market_targets.clone() {
+                (Vec::new(), cached_market_ids, cached_tracked)
+            } else {
+                let wait_ms = discovery_retry_after_ms.saturating_sub(now_ms).max(1_000);
+                sleep(Duration::from_millis(wait_ms as u64)).await;
+                continue;
+            }
+        } else {
             match discover_subscription_targets(api.as_ref(), &state, cfg.market_discovery_limit)
                 .await
             {
                 Ok(v) => {
                     last_market_targets = Some((v.1.clone(), v.2));
+                    discovery_failure_streak = 0;
+                    discovery_retry_after_ms = 0;
+                    discovery_log_state.mark_recovered(
+                        "polymarket_ws_user_discovery_recovered",
+                        json!({
+                            "market_count": v.1.len(),
+                            "tracked_markets": v.2
+                        }),
+                    );
                     v
                 }
                 Err(e) => {
+                    discovery_failure_streak = discovery_failure_streak.saturating_add(1);
+                    let discovery_wait_sec = discovery_backoff_sec(discovery_failure_streak);
+                    discovery_retry_after_ms = now_ms.saturating_add(
+                        i64::try_from(discovery_wait_sec.saturating_mul(1_000))
+                            .ok()
+                            .unwrap_or(300_000),
+                    );
                     if let Some((cached_market_ids, cached_tracked)) = last_market_targets.clone() {
-                        log_event(
-                            "polymarket_ws_user_discovery_failed_using_cache",
+                        discovery_log_state.mark_degraded(
+                            "polymarket_ws_user_discovery_degraded",
+                            "polymarket_ws_user_discovery_degraded_heartbeat",
+                            "discovery_failed_using_cache",
                             json!({
                                 "error": e.to_string(),
                                 "cached_market_count": cached_market_ids.len(),
-                                "cached_tracked_markets": cached_tracked
+                                "cached_tracked_markets": cached_tracked,
+                                "discovery_failure_streak": discovery_failure_streak,
+                                "next_discovery_wait_sec": discovery_wait_sec
                             }),
                         );
                         (Vec::new(), cached_market_ids, cached_tracked)
                     } else {
                         state.set_user_connected(false);
-                        log_event(
-                            "polymarket_ws_user_discovery_failed",
+                        discovery_log_state.mark_degraded(
+                            "polymarket_ws_user_discovery_degraded",
+                            "polymarket_ws_user_discovery_degraded_heartbeat",
+                            "discovery_failed_no_cache",
                             json!({
-                                "error": e.to_string()
+                                "error": e.to_string(),
+                                "discovery_failure_streak": discovery_failure_streak,
+                                "next_discovery_wait_sec": discovery_wait_sec
                             }),
                         );
-                        sleep(Duration::from_secs(backoff_sec)).await;
-                        backoff_sec = (backoff_sec * 2).min(cfg.backoff_max_sec);
+                        sleep(Duration::from_secs(discovery_wait_sec)).await;
                         continue;
                     }
                 }
-            };
+            }
+        };
         if market_ids.is_empty() {
             state.set_user_connected(false);
             sleep(Duration::from_secs(cfg.refresh_sec)).await;
@@ -1451,6 +1626,13 @@ async fn run_user_loop(
 
         backoff_sec = cfg.backoff_min_sec;
         state.set_user_connected(true);
+        user_stream_log_state.mark_recovered(
+            "polymarket_ws_user_stream_recovered",
+            json!({
+                "market_count": market_ids.len(),
+                "tracked_markets": tracked_markets
+            }),
+        );
         log_event(
             "polymarket_ws_user_subscribed",
             json!({
@@ -1596,8 +1778,10 @@ async fn run_user_loop(
                         }
                         Some(Ok(_)) => {}
                         Some(Err(e)) => {
-                            log_event(
-                                "polymarket_ws_user_stream_error",
+                            user_stream_log_state.mark_degraded(
+                                "polymarket_ws_user_stream_degraded",
+                                "polymarket_ws_user_stream_degraded_heartbeat",
+                                "stream_error",
                                 json!({
                                     "error": e.to_string(),
                                     "market_count": market_ids.len()
@@ -1606,8 +1790,10 @@ async fn run_user_loop(
                             break;
                         }
                         None => {
-                            log_event(
-                                "polymarket_ws_user_stream_closed",
+                            user_stream_log_state.mark_degraded(
+                                "polymarket_ws_user_stream_degraded",
+                                "polymarket_ws_user_stream_degraded_heartbeat",
+                                "stream_closed",
                                 json!({
                                     "market_count": market_ids.len()
                                 }),
@@ -1732,6 +1918,23 @@ async fn discover_subscription_targets(
     ws_state: &SharedPolymarketWsState,
     limit: u32,
 ) -> anyhow::Result<(Vec<U256>, Vec<B256>, usize)> {
+    let (extra_assets, extra_markets) = ws_state.subscription_scope_targets_snapshot();
+    if !extra_assets.is_empty() && !extra_markets.is_empty() {
+        let mut asset_vec = extra_assets;
+        asset_vec.sort();
+        asset_vec.dedup();
+        let mut market_vec = extra_markets;
+        market_vec.sort();
+        market_vec.dedup();
+        return Ok((asset_vec, market_vec.clone(), market_vec.len()));
+    }
+
+    let (fallback_assets, fallback_markets, fallback_tracked) =
+        discover_updown_slug_targets(api).await;
+    if !fallback_assets.is_empty() && !fallback_markets.is_empty() {
+        return Ok((fallback_assets, fallback_markets, fallback_tracked));
+    }
+
     let mut active_discovery_error: Option<anyhow::Error> = None;
     let markets = match api.get_all_active_markets(limit).await {
         Ok(markets) => markets,
@@ -1773,7 +1976,6 @@ async fn discover_subscription_targets(
         }
     }
 
-    let (extra_assets, extra_markets) = ws_state.subscription_scope_targets_snapshot();
     for asset in extra_assets {
         asset_ids.insert(asset);
     }
@@ -1790,26 +1992,12 @@ async fn discover_subscription_targets(
         return Ok((asset_vec, market_vec, tracked_markets));
     }
 
-    let (fallback_assets, fallback_markets, fallback_tracked) =
-        discover_updown_slug_targets(api).await;
-    if !fallback_assets.is_empty() && !fallback_markets.is_empty() {
-        if active_discovery_error.is_some() {
-            log_event(
-                "polymarket_ws_discovery_fallback_slug_targets",
-                json!({
-                    "asset_count": fallback_assets.len(),
-                    "market_count": fallback_markets.len(),
-                    "tracked_markets": fallback_tracked
-                }),
-            );
-        }
-        return Ok((fallback_assets, fallback_markets, fallback_tracked));
-    }
-
     if let Some(err) = active_discovery_error {
         return Err(err);
     }
-
+    if asset_vec.is_empty() || market_vec.is_empty() {
+        anyhow::bail!("discovery returned empty targets after fallback + active scan");
+    }
     Ok((asset_vec, market_vec, tracked_markets))
 }
 
@@ -1921,6 +2109,35 @@ fn env_i64(name: &str, default: i64) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn ws_env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn with_ws_env<F: FnOnce()>(updates: &[(&str, Option<&str>)], f: F) {
+        let _guard = ws_env_lock().lock().expect("ws env lock poisoned");
+        let mut previous: Vec<(&str, Option<String>)> = Vec::with_capacity(updates.len());
+        for (name, value) in updates {
+            previous.push((*name, std::env::var(name).ok()));
+            unsafe {
+                match value {
+                    Some(v) => std::env::set_var(name, v),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+        f();
+        for (name, value) in previous {
+            unsafe {
+                match value {
+                    Some(v) => std::env::set_var(name, v),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+    }
 
     #[test]
     fn parse_asset_id_accepts_decimal_token_ids() {
@@ -1983,5 +2200,62 @@ mod tests {
 
         state.clear_market_connected(0);
         assert!(!state.market_connected());
+    }
+
+    #[test]
+    fn ws_discovery_defaults_are_safe() {
+        with_ws_env(
+            &[
+                ("EVPOLY_PM_WS_MARKET_DISCOVERY_LIMIT", None),
+                ("EVPOLY_PM_WS_REFRESH_SEC", None),
+            ],
+            || {
+                let cfg = PolymarketWsConfig::default();
+                assert_eq!(cfg.market_discovery_limit, 250);
+                assert_eq!(cfg.refresh_sec, 90);
+            },
+        );
+    }
+
+    #[test]
+    fn discovery_backoff_schedule_is_90_180_300_capped() {
+        assert_eq!(discovery_backoff_sec(0), 90);
+        assert_eq!(discovery_backoff_sec(1), 90);
+        assert_eq!(discovery_backoff_sec(2), 180);
+        assert_eq!(discovery_backoff_sec(3), 300);
+        assert_eq!(discovery_backoff_sec(99), 300);
+    }
+
+    #[test]
+    fn discovery_uses_scope_targets_without_active_market_scan() {
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        rt.block_on(async {
+            let state = new_shared_polymarket_ws_state();
+            state.set_subscription_scope_targets(
+                "test-scope",
+                &[
+                    "71983878769646543569771747914086054960230109850913433882779852271882956401020"
+                        .to_string(),
+                ],
+                &[
+                    "0x0000000000000000000000000000000000000000000000000000000000000001"
+                        .to_string(),
+                ],
+            );
+            let api = crate::api::PolymarketApi::new(
+                "http://127.0.0.1:1".to_string(),
+                "http://127.0.0.1:1".to_string(),
+                None,
+                None,
+                None,
+            );
+            let (asset_ids, market_ids, tracked_markets) =
+                discover_subscription_targets(&api, &state, 250)
+                    .await
+                    .expect("scope discovery");
+            assert_eq!(asset_ids.len(), 1);
+            assert_eq!(market_ids.len(), 1);
+            assert_eq!(tracked_markets, 1);
+        });
     }
 }

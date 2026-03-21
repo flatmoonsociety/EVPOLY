@@ -32,6 +32,7 @@ pub mod simulation;
 pub mod size_policy;
 pub mod strategy;
 pub mod strategy_decider;
+pub mod symbol_ownership;
 pub mod tracking_db;
 pub mod trader;
 

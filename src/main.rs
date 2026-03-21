@@ -67,6 +67,7 @@ use polymarket_arbitrage_bot::strategy::{
     STRATEGY_ID_MM_SPORT_V1, STRATEGY_ID_PREMARKET_V1, STRATEGY_ID_SESSIONBAND_V1,
 };
 use polymarket_arbitrage_bot::strategy_decider::{self, PremarketIntent, StrategyDeciderConfig};
+use polymarket_arbitrage_bot::symbol_ownership;
 use polymarket_arbitrage_bot::tracking_db::{
     db_contention_premarket_throttle_factor, db_lock_contention_snapshot, PendingOrderRecord,
     StrategyFeatureSnapshotIntentRecord, TrackingDb, TradeEventRecord,
@@ -4857,6 +4858,15 @@ async fn main() -> Result<()> {
                 (tokio::sync::mpsc::Sender<ArbiterExecutionRequest>, i64),
             > = std::collections::HashMap::new();
             let mut premarket_scope_lane_gc_next_ms = 0_i64;
+            let mut dedupe_reject_summary: std::collections::HashMap<
+                (String, String, String, String),
+                (
+                    i64,
+                    u64,
+                    std::collections::HashSet<String>,
+                    std::collections::HashMap<String, u64>,
+                ),
+            > = std::collections::HashMap::new();
             while let Some(mut first_request) = arbiter_exec_rx.recv().await {
                 let dequeue_now_ms = chrono::Utc::now().timestamp_millis();
                 if first_request.timing.dequeue_ts_ms.is_none() {
@@ -4893,6 +4903,65 @@ async fn main() -> Result<()> {
 
                 for (mut request, result) in batch.into_iter().zip(arbiter_results.into_iter()) {
                     if result.status != ArbiterDecisionStatus::Approved {
+                        let reject_reason =
+                            result.reason.unwrap_or_else(|| "unspecified".to_string());
+                        if reject_reason == "dedupe_exact_key_lost" {
+                            let timeframe = request_timeframe_label(&request);
+                            let summary_key = (
+                                pool_label.to_string(),
+                                request.intent.strategy_id.clone(),
+                                timeframe.clone(),
+                                reject_reason.clone(),
+                            );
+                            let now_ms = chrono::Utc::now().timestamp_millis();
+                            let symbol = asset_symbol_from_request_id(request.request_id.as_str())
+                                .unwrap_or_else(|| {
+                                    token_family_for_token_type(&request.opportunity.token_type)
+                                        .to_string()
+                                });
+                            let entry =
+                                dedupe_reject_summary.entry(summary_key).or_insert_with(|| {
+                                    (
+                                        now_ms,
+                                        0_u64,
+                                        std::collections::HashSet::new(),
+                                        std::collections::HashMap::new(),
+                                    )
+                                });
+                            entry.1 = entry.1.saturating_add(1);
+                            entry.2.insert(request.opportunity.token_id.clone());
+                            *entry.3.entry(symbol).or_insert(0) += 1;
+                            if now_ms.saturating_sub(entry.0) >= 30_000 {
+                                let mut top_symbols = entry
+                                    .3
+                                    .iter()
+                                    .map(|(symbol, count)| (symbol.clone(), *count))
+                                    .collect::<Vec<_>>();
+                                top_symbols
+                                    .sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+                                top_symbols.truncate(3);
+                                log_event(
+                                    "arbiter_dispatch_rejected_dedupe_summary",
+                                    json!({
+                                        "pool": pool_label,
+                                        "strategy_id": request.intent.strategy_id,
+                                        "timeframe": timeframe,
+                                        "reason": reject_reason,
+                                        "count": entry.1,
+                                        "token_count": entry.2.len(),
+                                        "top_symbols": top_symbols
+                                            .into_iter()
+                                            .map(|(symbol, count)| json!({"symbol": symbol, "count": count}))
+                                            .collect::<Vec<_>>()
+                                    }),
+                                );
+                                entry.0 = now_ms;
+                                entry.1 = 0;
+                                entry.2.clear();
+                                entry.3.clear();
+                            }
+                            continue;
+                        }
                         log_event(
                             "arbiter_dispatch_rejected",
                             json!({
@@ -4903,7 +4972,7 @@ async fn main() -> Result<()> {
                                 "period_timestamp": request.opportunity.period_timestamp,
                                 "token_id": request.opportunity.token_id,
                                 "entry_mode": request.entry_mode.as_str(),
-                                "reason": result.reason.unwrap_or_else(|| "unspecified".to_string())
+                                "reason": reject_reason
                             }),
                         );
                         continue;
@@ -5355,7 +5424,10 @@ async fn main() -> Result<()> {
         .clamp(0, 5_000);
     let endgame_cfg = Arc::new(EndgameExecutionConfig::from_env());
     let endgame_base_size_usd = size_policy::base_size_usd_from_env("EVPOLY_ENDGAME_BASE_SIZE_USD");
-    let endgame_symbols = endgame_cfg.enabled_symbols();
+    let endgame_symbols = symbol_ownership::filter_symbols_for_strategy(
+        STRATEGY_ID_ENDGAME_SWEEP_V1,
+        endgame_cfg.enabled_symbols().as_slice(),
+    );
     let endgame_alpha_required_cfg = endgame_alpha_required();
     let endgame_alpha_wallet = remote_alpha_proxy_wallet.clone();
     warn_remote_alpha_config_startup(endgame_alpha_required_cfg);
@@ -6933,7 +7005,10 @@ async fn main() -> Result<()> {
         let plan3_tables = Arc::new(Plan3Tables::empty_for_remote());
         let d1_tables: Option<Arc<PlanDailyTables>> = None;
         {
-            let evcurve_symbols = evcurve_cfg.enabled_symbols();
+            let evcurve_symbols = symbol_ownership::filter_symbols_for_strategy(
+                STRATEGY_ID_EVCURVE_V1,
+                evcurve_cfg.enabled_symbols().as_slice(),
+            );
             let evcurve_timeframes = evcurve_cfg
                 .enabled_timeframes()
                 .iter()
@@ -11147,7 +11222,10 @@ async fn main() -> Result<()> {
     let sessionband_cfg = Arc::new(sessionband::SessionBandExecutionConfig::from_env());
     if sessionband_cfg.enable {
         {
-            let sessionband_symbols = sessionband_cfg.enabled_symbols();
+            let sessionband_symbols = symbol_ownership::filter_symbols_for_strategy(
+                STRATEGY_ID_SESSIONBAND_V1,
+                sessionband_cfg.enabled_symbols().as_slice(),
+            );
             let sessionband_timeframes = sessionband_cfg.enabled_timeframes();
             let symbols_csv = sessionband_symbols.join(",");
             let timeframes_csv = sessionband_timeframes
@@ -12200,7 +12278,10 @@ async fn main() -> Result<()> {
 
     let evsnipe_cfg = Arc::new(evsnipe::EvsnipeConfig::from_env());
     if evsnipe_cfg.enable {
-        let symbols = evsnipe_cfg.symbols.clone();
+        let symbols = symbol_ownership::filter_symbols_for_strategy(
+            STRATEGY_ID_EVSNIPE_V1,
+            &evsnipe_cfg.symbols,
+        );
         let symbols_csv = symbols.join(",");
         eprintln!(
             "⚡ EVSnipe enabled (symbols=[{}], refresh={}s, max_days={}, size=${:.2}, pre_bps={:.2}, pre_ratio={:.2}, max_buy={:.4}, cross_levels={}, stale={}ms, strategy_cap=${:.2}, max_inflight={})",
@@ -16545,6 +16626,18 @@ async fn main() -> Result<()> {
                 > = std::collections::HashMap::new();
                 let mut last_skip_emit_ms: std::collections::HashMap<String, i64> =
                     std::collections::HashMap::new();
+                let mut mm_quote_plan_log_state_by_condition: std::collections::HashMap<
+                    String,
+                    (String, i64),
+                > = std::collections::HashMap::new();
+                let mut mm_quote_skew_state_by_key: std::collections::HashMap<
+                    String,
+                    (f64, usize, bool),
+                > = std::collections::HashMap::new();
+                let mut mm_safe_buffer_state_by_key: std::collections::HashMap<
+                    String,
+                    (Option<f64>, i64),
+                > = std::collections::HashMap::new();
                 let mut metrics = mm::metrics::MmMetrics::default();
                 let mm_constraints_failure_cooldown_ms = 60_000_i64;
                 let mm_market_details_failure_cooldown_ms = 60_000_i64;
@@ -16675,6 +16768,8 @@ async fn main() -> Result<()> {
                     std::collections::HashSet::new();
                 let mut mm_last_inventory_janitor_ms = 0_i64;
                 let mut mm_last_inventory_janitor_error_ms = 0_i64;
+                let mut mm_inventory_janitor_last_snapshot: Option<(usize, usize, usize)> = None;
+                let mut mm_inventory_janitor_last_emit_ms = 0_i64;
                 let mut mm_price_history = mm::metrics::MmPriceHistory::default();
                 let mut mm_markout_tracker = mm::metrics::MmMarkoutTracker::default();
                 let mut mm_last_fill_scan_ms = 0_i64;
@@ -16769,6 +16864,13 @@ async fn main() -> Result<()> {
                     String,
                     MmDominantState,
                 > = std::collections::HashMap::new();
+                let mut mm_state_action_mismatch_last_emit_ms_by_condition: std::collections::HashMap<
+                    String,
+                    i64,
+                > = std::collections::HashMap::new();
+                let mut mm_state_action_mismatch_active_conditions: std::collections::HashSet<
+                    String,
+                > = std::collections::HashSet::new();
                 let mut mm_wait_scope_token_ids: Vec<String> = Vec::new();
                 let mut mm_last_state_sizes_log_ms = 0_i64;
                 let mut mm_selected_token_prewarm_retry_after_ms: std::collections::HashMap<
@@ -16881,6 +16983,12 @@ async fn main() -> Result<()> {
                     }
                     let mut mm_wait_scope_next: std::collections::HashSet<String> =
                         std::collections::HashSet::new();
+                    let mut mm_wait_scope_condition_next: std::collections::HashSet<String> =
+                        std::collections::HashSet::new();
+                    let mut mm_floor_upscaled_agg: std::collections::HashMap<
+                        (String, String, String),
+                        (u64, f64, f64, usize),
+                    > = std::collections::HashMap::new();
                     if mm_bg_refresh_rx_for_loop.has_changed().unwrap_or(false) {
                         if let Some(snapshot) =
                             mm_bg_refresh_rx_for_loop.borrow_and_update().clone()
@@ -17916,19 +18024,36 @@ async fn main() -> Result<()> {
                                         target_override,
                                     ));
                                 }
-                                log_event(
-                                    "mm_rewards_inventory_janitor_snapshot",
-                                    json!({
-                                        "strategy_id": STRATEGY_ID_MM_REWARDS_V1,
-                                        "refresh_ms": inventory_janitor_refresh_ms,
-                                        "source": "wallet",
-                                        "forced_market_count": mm_forced_inventory_selectors.len(),
-                                        "scope_blocked_conditions": mm_inventory_scope_blocked_conditions.len(),
-                                        "scope_violation_rows": scope_violations,
-                                        "missing_state_rows": missing_state,
-                                        "missing_slug_rows": missing_slug
-                                    }),
+                                let janitor_snapshot = (
+                                    mm_forced_inventory_selectors.len(),
+                                    mm_inventory_scope_blocked_conditions.len(),
+                                    scope_violations
+                                        .saturating_add(missing_state)
+                                        .saturating_add(missing_slug),
                                 );
+                                let snapshot_changed = mm_inventory_janitor_last_snapshot
+                                    .map(|previous| previous != janitor_snapshot)
+                                    .unwrap_or(true);
+                                let heartbeat_due = now_ms
+                                    .saturating_sub(mm_inventory_janitor_last_emit_ms)
+                                    >= 300_000;
+                                if snapshot_changed || heartbeat_due {
+                                    mm_inventory_janitor_last_snapshot = Some(janitor_snapshot);
+                                    mm_inventory_janitor_last_emit_ms = now_ms;
+                                    log_event(
+                                        "mm_rewards_inventory_janitor_snapshot",
+                                        json!({
+                                            "strategy_id": STRATEGY_ID_MM_REWARDS_V1,
+                                            "refresh_ms": inventory_janitor_refresh_ms,
+                                            "source": "wallet",
+                                            "forced_market_count": mm_forced_inventory_selectors.len(),
+                                            "scope_blocked_conditions": mm_inventory_scope_blocked_conditions.len(),
+                                            "scope_violation_rows": scope_violations,
+                                            "missing_state_rows": missing_state,
+                                            "missing_slug_rows": missing_slug
+                                        }),
+                                    );
+                                }
                             }
                             Ok(_) => match tracking_db_for_mm_rewards
                                 .list_open_position_inventory_by_strategy(
@@ -18015,19 +18140,36 @@ async fn main() -> Result<()> {
                                             Some(mm::MmModeTarget::new(symbol.as_str(), timeframe)),
                                         ));
                                     }
-                                    log_event(
-                                        "mm_rewards_inventory_janitor_snapshot",
-                                        json!({
-                                            "strategy_id": STRATEGY_ID_MM_REWARDS_V1,
-                                            "refresh_ms": inventory_janitor_refresh_ms,
-                                            "source": "positions_v2_fallback",
-                                            "forced_market_count": mm_forced_inventory_selectors.len(),
-                                            "scope_blocked_conditions": mm_inventory_scope_blocked_conditions.len(),
-                                            "scope_violation_rows": scope_violations,
-                                            "missing_state_rows": missing_state,
-                                            "missing_slug_rows": missing_slug
-                                        }),
+                                    let janitor_snapshot = (
+                                        mm_forced_inventory_selectors.len(),
+                                        mm_inventory_scope_blocked_conditions.len(),
+                                        scope_violations
+                                            .saturating_add(missing_state)
+                                            .saturating_add(missing_slug),
                                     );
+                                    let snapshot_changed = mm_inventory_janitor_last_snapshot
+                                        .map(|previous| previous != janitor_snapshot)
+                                        .unwrap_or(true);
+                                    let heartbeat_due = now_ms
+                                        .saturating_sub(mm_inventory_janitor_last_emit_ms)
+                                        >= 300_000;
+                                    if snapshot_changed || heartbeat_due {
+                                        mm_inventory_janitor_last_snapshot = Some(janitor_snapshot);
+                                        mm_inventory_janitor_last_emit_ms = now_ms;
+                                        log_event(
+                                            "mm_rewards_inventory_janitor_snapshot",
+                                            json!({
+                                                "strategy_id": STRATEGY_ID_MM_REWARDS_V1,
+                                                "refresh_ms": inventory_janitor_refresh_ms,
+                                                "source": "positions_v2_fallback",
+                                                "forced_market_count": mm_forced_inventory_selectors.len(),
+                                                "scope_blocked_conditions": mm_inventory_scope_blocked_conditions.len(),
+                                                "scope_violation_rows": scope_violations,
+                                                "missing_state_rows": missing_state,
+                                                "missing_slug_rows": missing_slug
+                                            }),
+                                        );
+                                    }
                                 }
                                 Err(e) => {
                                     if now_ms.saturating_sub(mm_last_inventory_janitor_error_ms)
@@ -18712,6 +18854,10 @@ async fn main() -> Result<()> {
                         };
                         mm_wait_scope_next.insert(up_token_id.clone());
                         mm_wait_scope_next.insert(down_token_id.clone());
+                        if !market.condition_id.trim().is_empty() {
+                            mm_wait_scope_condition_next
+                                .insert(market.condition_id.trim().to_string());
+                        }
                         let mut scope_blocked = mm_inventory_scope_blocked_conditions
                             .contains(market.condition_id.as_str());
                         let mut scope_other_strategies: std::collections::HashSet<String> =
@@ -19952,53 +20098,78 @@ async fn main() -> Result<()> {
                             continue;
                         }
 
-                        log_event(
-                            "mm_rewards_quote_plan",
-                            json!({
-                                "strategy_id": STRATEGY_ID_MM_REWARDS_V1,
-                                "source": market_source,
-                                "mode": mode.as_str(),
-                                "runtime_mode": mm_cfg_for_loop.runtime_mode.as_str(),
-                                "competition_level": competition_level,
-                                "competition_raw": competition_raw,
-                                "competition_source": competition_source,
-                                "competition_freeze_active": competition_freeze_active,
-                                "fair_mid_enable": mm_cfg_for_loop.fair_mid_enable,
-                                "fair_mid_raw": fair_mid_output.map(|output| output.raw),
-                                "fair_mid_limited": fair_mid_output.map(|output| output.limited),
-                                "fair_mid_limited_applied": fair_mid_output
-                                    .map(|output| output.limited_applied),
-                                "fair_mid_up_cap_abs": fair_mid_output
-                                    .map(|output| output.up_cap_abs),
-                                "fair_mid_down_cap_abs": fair_mid_output
-                                    .map(|output| output.down_cap_abs),
-                                "symbol": target.symbol,
-                                "timeframe": target.timeframe.as_str(),
-                                "market_open_ts": market_open_ts,
-                                "condition_id": market.condition_id,
-                                "up_token_id": up_token_id,
-                                "down_token_id": down_token_id,
-                                "up_best_bid": up_best_bid,
-                                "up_best_ask": up_best_ask,
-                                "down_best_bid": down_best_bid,
-                                "down_best_ask": down_best_ask,
-                                "up_ladder": up_ladder_prices,
-                                "down_ladder": down_ladder_prices,
-                                "level_shares": mm_cfg_for_loop.quote_shares_per_side,
-                                "favor_side_configured": mm_cfg_for_loop.favor_side.as_str(),
-                                "favor_side_effective": effective_favor_side.as_str(),
-                                "favor_side_threshold_price": favor_side_threshold,
-                                "up_reference_price": up_reference_price,
-                                "down_reference_price": down_reference_price,
-                                "reward_min_size_enforce": mm_cfg_for_loop.reward_min_size_enforce,
-                                "reward_min_size_unit": mm_cfg_for_loop.reward_min_size_unit.as_str(),
-                                "reward_min_size_raw": detail_snapshot.min_size,
-                                "reward_rate_hint": detail_snapshot.reward_daily_rate,
-                                "midpoint": detail_snapshot.midpoint,
-                                "max_spread": detail_snapshot.max_spread,
-                                "min_size": detail_snapshot.min_size
-                            }),
+                        let quote_plan_fingerprint = format!(
+                            "{}|{}|{}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{}|{}|{}",
+                            market.condition_id,
+                            mode.as_str(),
+                            competition_level,
+                            up_best_bid,
+                            up_best_ask,
+                            down_best_bid,
+                            down_best_ask,
+                            up_ladder_prices.first().copied(),
+                            down_ladder_prices.first().copied(),
+                            up_ladder_prices.len().min(down_ladder_prices.len()),
+                            effective_favor_side.as_str(),
+                            mm_cfg_for_loop.reward_min_size_enforce
                         );
+                        let quote_plan_state = mm_quote_plan_log_state_by_condition
+                            .entry(market.condition_id.clone())
+                            .or_insert_with(|| (String::new(), 0));
+                        let quote_plan_changed = quote_plan_state.0 != quote_plan_fingerprint;
+                        let quote_plan_heartbeat_due =
+                            now_ms.saturating_sub(quote_plan_state.1) >= 60_000;
+                        if quote_plan_changed || quote_plan_heartbeat_due {
+                            quote_plan_state.0 = quote_plan_fingerprint;
+                            quote_plan_state.1 = now_ms;
+                            log_event(
+                                "mm_rewards_quote_plan",
+                                json!({
+                                    "strategy_id": STRATEGY_ID_MM_REWARDS_V1,
+                                    "source": market_source,
+                                    "mode": mode.as_str(),
+                                    "runtime_mode": mm_cfg_for_loop.runtime_mode.as_str(),
+                                    "competition_level": competition_level,
+                                    "competition_raw": competition_raw,
+                                    "competition_source": competition_source,
+                                    "competition_freeze_active": competition_freeze_active,
+                                    "fair_mid_enable": mm_cfg_for_loop.fair_mid_enable,
+                                    "fair_mid_raw": fair_mid_output.map(|output| output.raw),
+                                    "fair_mid_limited": fair_mid_output.map(|output| output.limited),
+                                    "fair_mid_limited_applied": fair_mid_output
+                                        .map(|output| output.limited_applied),
+                                    "fair_mid_up_cap_abs": fair_mid_output
+                                        .map(|output| output.up_cap_abs),
+                                    "fair_mid_down_cap_abs": fair_mid_output
+                                        .map(|output| output.down_cap_abs),
+                                    "symbol": target.symbol,
+                                    "timeframe": target.timeframe.as_str(),
+                                    "market_open_ts": market_open_ts,
+                                    "condition_id": market.condition_id,
+                                    "up_token_id": up_token_id,
+                                    "down_token_id": down_token_id,
+                                    "up_best_bid": up_best_bid,
+                                    "up_best_ask": up_best_ask,
+                                    "down_best_bid": down_best_bid,
+                                    "down_best_ask": down_best_ask,
+                                    "up_ladder": up_ladder_prices,
+                                    "down_ladder": down_ladder_prices,
+                                    "level_shares": mm_cfg_for_loop.quote_shares_per_side,
+                                    "favor_side_configured": mm_cfg_for_loop.favor_side.as_str(),
+                                    "favor_side_effective": effective_favor_side.as_str(),
+                                    "favor_side_threshold_price": favor_side_threshold,
+                                    "up_reference_price": up_reference_price,
+                                    "down_reference_price": down_reference_price,
+                                    "reward_min_size_enforce": mm_cfg_for_loop.reward_min_size_enforce,
+                                    "reward_min_size_unit": mm_cfg_for_loop.reward_min_size_unit.as_str(),
+                                    "reward_min_size_raw": detail_snapshot.min_size,
+                                    "reward_rate_hint": detail_snapshot.reward_daily_rate,
+                                    "midpoint": detail_snapshot.midpoint,
+                                    "max_spread": detail_snapshot.max_spread,
+                                    "min_size": detail_snapshot.min_size
+                                }),
+                            );
+                        }
 
                         if !mm_cfg_for_loop.runtime_mode.is_live() {
                             continue;
@@ -21787,11 +21958,20 @@ async fn main() -> Result<()> {
                                     "quote_skew:{}:{}:{}",
                                     market.condition_id, token_id, side_label
                                 );
-                                let should_emit = last_skip_emit_ms
+                                let previous_skew =
+                                    mm_quote_skew_state_by_key.get(skew_key.as_str()).copied();
+                                let material_change = previous_skew
+                                    .map(|(prev_mult, prev_levels, prev_floor_active)| {
+                                        (side_size_mult - prev_mult).abs() >= 0.05
+                                            || prev_levels != side_extra_deepen_levels
+                                            || prev_floor_active != reward_floor_active
+                                    })
+                                    .unwrap_or(true);
+                                let cooldown_ready = last_skip_emit_ms
                                     .get(skew_key.as_str())
                                     .map(|last| now_ms.saturating_sub(*last) >= 10_000)
                                     .unwrap_or(true);
-                                if should_emit {
+                                if cooldown_ready && material_change {
                                     last_skip_emit_ms.insert(skew_key, now_ms);
                                     log_event(
                                         "mm_rewards_quote_skew_applied",
@@ -21820,6 +22000,17 @@ async fn main() -> Result<()> {
                                             "prefill_pressure_active": prefill_pressure_active,
                                             "prefill_ewma_pickoff_bps": markout_ewma_pickoff_bps
                                         }),
+                                    );
+                                    mm_quote_skew_state_by_key.insert(
+                                        format!(
+                                            "quote_skew:{}:{}:{}",
+                                            market.condition_id, token_id, side_label
+                                        ),
+                                        (
+                                            side_size_mult,
+                                            side_extra_deepen_levels,
+                                            reward_floor_active,
+                                        ),
                                     );
                                 }
                             }
@@ -23143,12 +23334,27 @@ async fn main() -> Result<()> {
                                     "mm_rewards_safe_buffer_applied:{}:{}:{}",
                                     market.condition_id, token_id, side_label
                                 );
-                                let should_emit = last_skip_emit_ms
+                                let ladder_top_after = effective_ladder_prices.first().copied();
+                                let previous_state =
+                                    mm_safe_buffer_state_by_key.get(safe_key.as_str()).copied();
+                                let material_change = previous_state
+                                    .map(|(prev_top, prev_shift_ticks)| {
+                                        let top_changed = match (prev_top, ladder_top_after) {
+                                            (Some(prev), Some(curr)) => {
+                                                (prev - curr).abs() > (tick_size * 0.5)
+                                            }
+                                            (None, None) => false,
+                                            _ => true,
+                                        };
+                                        top_changed || prev_shift_ticks != safe_buffer_shift_ticks
+                                    })
+                                    .unwrap_or(true);
+                                let cooldown_ready = last_skip_emit_ms
                                     .get(safe_key.as_str())
                                     .map(|last| now_ms.saturating_sub(*last) >= 10_000)
                                     .unwrap_or(true);
-                                if should_emit {
-                                    last_skip_emit_ms.insert(safe_key, now_ms);
+                                if cooldown_ready && material_change {
+                                    last_skip_emit_ms.insert(safe_key.clone(), now_ms);
                                     log_event(
                                         "mm_rewards_safe_buffer_applied",
                                         json!({
@@ -23161,9 +23367,13 @@ async fn main() -> Result<()> {
                                             "competition_level": competition_level,
                                             "market_source": market_source,
                                             "best_bid": side_best_bid,
-                                            "ladder_top_after": effective_ladder_prices.first().copied(),
+                                            "ladder_top_after": ladder_top_after,
                                             "ladder_bottom_after": effective_ladder_prices.last().copied()
                                         }),
+                                    );
+                                    mm_safe_buffer_state_by_key.insert(
+                                        safe_key,
+                                        (ladder_top_after, safe_buffer_shift_ticks),
                                     );
                                 }
                             }
@@ -23865,36 +24075,18 @@ async fn main() -> Result<()> {
                                 if side_size_shares + 1e-9
                                     > base_size_shares_for_rung.max(reward_min_shares_for_rung)
                                 {
-                                    let upscale_key = format!(
-                                        "mm_rewards_floor_size_upscaled:{}:{}:{}:{}",
-                                        market.condition_id, token_id, side_label, ladder_idx
+                                    let agg_key = (
+                                        market.condition_id.clone(),
+                                        token_id.to_string(),
+                                        side_label.to_string(),
                                     );
-                                    let should_emit = last_skip_emit_ms
-                                        .get(upscale_key.as_str())
-                                        .map(|last| now_ms.saturating_sub(*last) >= 10_000)
-                                        .unwrap_or(true);
-                                    if should_emit {
-                                        last_skip_emit_ms.insert(upscale_key, now_ms);
-                                        log_event(
-                                            "mm_rewards_floor_size_upscaled",
-                                            json!({
-                                                "strategy_id": STRATEGY_ID_MM_REWARDS_V1,
-                                                "condition_id": market.condition_id,
-                                                "token_id": token_id,
-                                                "side": side_label,
-                                                "ladder_idx": ladder_idx,
-                                                "rung_bucket": rung_bucket.as_str(),
-                                                "submit_price": submit_price,
-                                                "base_size_shares": base_size_shares_for_rung,
-                                                "reward_min_shares_for_rung": reward_min_shares_for_rung,
-                                                "min_shares_for_order_floor": min_shares_for_order_floor,
-                                                "scaled_size_shares": side_size_shares,
-                                                "required_notional_usd": required_notional_usd,
-                                                "scaled_size_usd": side_size_usd,
-                                                "max_shares_per_order": mm_cfg_for_loop.max_shares_per_order
-                                            }),
-                                        );
-                                    }
+                                    let entry = mm_floor_upscaled_agg
+                                        .entry(agg_key)
+                                        .or_insert((0_u64, 0.0_f64, 0.0_f64, 0_usize));
+                                    entry.0 = entry.0.saturating_add(1);
+                                    entry.1 = entry.1.max(side_size_usd);
+                                    entry.2 = entry.2.max(required_notional_usd);
+                                    entry.3 = entry.3.max(ladder_idx);
                                 }
                                 let (up_quote_price, down_quote_price) =
                                     if matches!(direction, Direction::Up) {
@@ -26542,21 +26734,38 @@ async fn main() -> Result<()> {
                             );
                         }
                         if mm_market_state == "quoting" && open_orders_total == 0 {
-                            log_event(
-                                "mm_rewards_state_action_mismatch",
-                                json!({
-                                    "strategy_id": STRATEGY_ID_MM_REWARDS_V1,
-                                    "condition_id": market.condition_id,
-                                    "market_slug": market.slug,
-                                    "mode": mode.as_str(),
-                                    "source": market_source,
-                                    "state": mm_market_state.clone(),
-                                    "reason": mm_market_reason.clone(),
-                                    "open_buy_orders": open_buy_orders,
-                                    "open_sell_orders": open_sell_orders,
-                                    "mm_market_submit_count": mm_market_submit_count
-                                }),
-                            );
+                            let condition_key = market.condition_id.clone();
+                            let was_active = mm_state_action_mismatch_active_conditions
+                                .contains(condition_key.as_str());
+                            let last_emit_ms = mm_state_action_mismatch_last_emit_ms_by_condition
+                                .get(condition_key.as_str())
+                                .copied()
+                                .unwrap_or(0);
+                            let should_emit =
+                                !was_active || now_ms.saturating_sub(last_emit_ms) >= 30_000;
+                            if should_emit {
+                                mm_state_action_mismatch_last_emit_ms_by_condition
+                                    .insert(condition_key.clone(), now_ms);
+                                log_event(
+                                    "mm_rewards_state_action_mismatch",
+                                    json!({
+                                        "strategy_id": STRATEGY_ID_MM_REWARDS_V1,
+                                        "condition_id": market.condition_id,
+                                        "market_slug": market.slug,
+                                        "mode": mode.as_str(),
+                                        "source": market_source,
+                                        "state": mm_market_state.clone(),
+                                        "reason": mm_market_reason.clone(),
+                                        "open_buy_orders": open_buy_orders,
+                                        "open_sell_orders": open_sell_orders,
+                                        "mm_market_submit_count": mm_market_submit_count
+                                    }),
+                                );
+                            }
+                            mm_state_action_mismatch_active_conditions.insert(condition_key);
+                        } else {
+                            mm_state_action_mismatch_active_conditions
+                                .remove(market.condition_id.as_str());
                         }
                         let ladder_top_price = match (
                             up_ladder_prices.first().copied(),
@@ -26706,10 +26915,51 @@ async fn main() -> Result<()> {
                         );
                     }
 
-                    if !mm_wait_scope_next.is_empty() {
-                        mm_wait_scope_token_ids = mm_wait_scope_next.into_iter().collect();
-                        mm_wait_scope_token_ids.sort_unstable();
-                        mm_wait_scope_token_ids.dedup();
+                    for (
+                        (condition_id, token_id, side),
+                        (
+                            affected_rung_count,
+                            max_scaled_size_usd,
+                            max_required_notional_usd,
+                            highest_ladder_idx,
+                        ),
+                    ) in mm_floor_upscaled_agg.into_iter()
+                    {
+                        if affected_rung_count == 0 {
+                            continue;
+                        }
+                        log_event(
+                            "mm_rewards_floor_size_upscaled",
+                            json!({
+                                "strategy_id": STRATEGY_ID_MM_REWARDS_V1,
+                                "condition_id": condition_id,
+                                "token_id": token_id,
+                                "side": side,
+                                "affected_rung_count": affected_rung_count,
+                                "max_scaled_size_usd": max_scaled_size_usd,
+                                "max_required_notional_usd": max_required_notional_usd,
+                                "highest_ladder_idx": highest_ladder_idx
+                            }),
+                        );
+                    }
+
+                    mm_wait_scope_token_ids = mm_wait_scope_next.into_iter().collect();
+                    mm_wait_scope_token_ids.sort_unstable();
+                    mm_wait_scope_token_ids.dedup();
+                    let mut mm_wait_scope_condition_ids =
+                        mm_wait_scope_condition_next.into_iter().collect::<Vec<_>>();
+                    mm_wait_scope_condition_ids.sort_unstable();
+                    mm_wait_scope_condition_ids.dedup();
+                    if mm_wait_scope_token_ids.is_empty() || mm_wait_scope_condition_ids.is_empty()
+                    {
+                        polymarket_ws_for_mm_rewards
+                            .clear_subscription_scope_targets(STRATEGY_ID_MM_REWARDS_V1);
+                    } else {
+                        polymarket_ws_for_mm_rewards.set_subscription_scope_targets(
+                            STRATEGY_ID_MM_REWARDS_V1,
+                            mm_wait_scope_token_ids.as_slice(),
+                            mm_wait_scope_condition_ids.as_slice(),
+                        );
                     }
 
                     if now_ms.saturating_sub(last_heartbeat_ms) >= 300_000 {
@@ -28349,6 +28599,21 @@ fn log_arbiter_request_timing(
     let proxy_update_ts_ms = timing.proxy_update_ts_ms;
     let proxy_age_at_decision_ms = timing.proxy_age_at_decision_ms;
     let proxy_max_age_override_ms = timing.proxy_max_age_override_ms;
+    let queue_wait_ms = safe_ms_delta(enqueue_ts_ms, dequeue_ts_ms);
+    let decision_to_worker_done_ms = safe_ms_delta(decision_ts_ms, worker_done_ts_ms);
+    let trace_full = env_bool_named("EVPOLY_TRACE_ENTRY_EXECUTION_TIMING", false);
+    let should_emit = if trace_full {
+        true
+    } else {
+        status != "success"
+            || queue_wait_ms.map(|value| value > 500).unwrap_or(false)
+            || decision_to_worker_done_ms
+                .map(|value| value > 1_500)
+                .unwrap_or(false)
+    };
+    if !should_emit {
+        return;
+    }
     log_event(
         "entry_execution_timing",
         json!({
@@ -28375,11 +28640,11 @@ fn log_arbiter_request_timing(
             "proxy_age_at_submit_ms": safe_ms_delta(proxy_update_ts_ms, submit_start_ts_ms),
             "proxy_max_age_override_ms": proxy_max_age_override_ms,
             "decision_to_enqueue_ms": safe_ms_delta(decision_ts_ms, enqueue_ts_ms),
-            "queue_wait_ms": safe_ms_delta(enqueue_ts_ms, dequeue_ts_ms),
+            "queue_wait_ms": queue_wait_ms,
             "dequeue_to_worker_start_ms": safe_ms_delta(dequeue_ts_ms, worker_start_ts_ms),
             "decision_to_submit_ms": safe_ms_delta(decision_ts_ms, submit_start_ts_ms),
             "submit_runtime_ms": safe_ms_delta(submit_start_ts_ms, worker_done_ts_ms),
-            "decision_to_worker_done_ms": safe_ms_delta(decision_ts_ms, worker_done_ts_ms)
+            "decision_to_worker_done_ms": decision_to_worker_done_ms
         }),
     );
 }
@@ -29369,7 +29634,6 @@ fn coinbase_product_id_for_market_symbol(symbol: &str) -> Option<&'static str> {
         "ETH" => Some("ETH-USD"),
         "SOL" => Some("SOL-USD"),
         "XRP" => Some("XRP-USD"),
-        "DOGE" => Some("DOGE-USD"),
         _ => None,
     }
 }
@@ -29380,7 +29644,6 @@ fn market_symbol_from_coinbase_product_id(product_id: &str) -> Option<&'static s
         "ETH-USD" => Some("ETH"),
         "SOL-USD" => Some("SOL"),
         "XRP-USD" => Some("XRP"),
-        "DOGE-USD" => Some("DOGE"),
         _ => None,
     }
 }
@@ -33119,6 +33382,74 @@ mod tests {
         assert_eq!(endgame_sweep_poly_price_band_for_tick(1), (0.97, 0.99));
         assert_eq!(endgame_sweep_poly_price_band_for_tick(2), (0.98, 0.99));
         assert_eq!(endgame_sweep_poly_price_band_for_tick(7), (0.98, 0.99));
+    }
+
+    #[test]
+    fn symbol_ownership_bootstrap_filters_specials_to_endgame_and_evsnipe() {
+        let raw = vec![
+            "BTC".to_string(),
+            "ETH".to_string(),
+            "SOL".to_string(),
+            "XRP".to_string(),
+            "DOGE".to_string(),
+            "BNB".to_string(),
+            "HYPE".to_string(),
+        ];
+        assert_eq!(
+            symbol_ownership::filter_symbols_for_strategy(STRATEGY_ID_EVCURVE_V1, &raw),
+            vec!["BTC", "ETH", "SOL", "XRP"]
+        );
+        assert_eq!(
+            symbol_ownership::filter_symbols_for_strategy(STRATEGY_ID_SESSIONBAND_V1, &raw),
+            vec!["BTC", "ETH", "SOL", "XRP"]
+        );
+        assert_eq!(
+            symbol_ownership::filter_symbols_for_strategy(STRATEGY_ID_ENDGAME_SWEEP_V1, &raw),
+            vec!["BTC", "ETH", "SOL", "XRP", "DOGE", "BNB", "HYPE"]
+        );
+        assert_eq!(
+            symbol_ownership::filter_symbols_for_strategy(STRATEGY_ID_EVSNIPE_V1, &raw),
+            vec!["BTC", "ETH", "SOL", "XRP", "DOGE", "BNB", "HYPE"]
+        );
+    }
+
+    #[test]
+    fn doge_has_no_coinbase_product_mapping() {
+        assert_eq!(coinbase_product_id_for_market_symbol("DOGE"), None);
+        assert_eq!(coinbase_product_id_for_market_symbol("DOGECOIN"), None);
+        assert_eq!(market_symbol_from_coinbase_product_id("DOGE-USD"), None);
+    }
+
+    #[test]
+    fn endgame_routing_for_doge_bnb_hype_is_preserved() {
+        assert_eq!(
+            endgame_proxy_source_for_symbol_timeframe("DOGE", Timeframe::M5),
+            EndgameProxySource::Binance
+        );
+        assert_eq!(
+            endgame_proxy_source_for_symbol_timeframe("BNB", Timeframe::H1),
+            EndgameProxySource::Binance
+        );
+        assert_eq!(
+            endgame_proxy_source_for_symbol_timeframe("HYPE", Timeframe::M5),
+            EndgameProxySource::Hyperliquid
+        );
+        assert_eq!(
+            endgame_proxy_source_for_symbol_timeframe("HYPE", Timeframe::M15),
+            EndgameProxySource::Hyperliquid
+        );
+        assert_eq!(
+            endgame_proxy_source_for_symbol_timeframe("HYPE", Timeframe::H4),
+            EndgameProxySource::Hyperliquid
+        );
+        assert_eq!(
+            endgame_proxy_source_for_symbol_timeframe("HYPE", Timeframe::H1),
+            EndgameProxySource::Binance
+        );
+        assert_eq!(
+            endgame_proxy_source_for_symbol_timeframe("BTC", Timeframe::M5),
+            EndgameProxySource::Coinbase
+        );
     }
 
     #[test]

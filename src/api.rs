@@ -80,6 +80,39 @@ const USDC_BALANCE_CACHE_HIT_TTL_MS: i64 = 60_000;
 const USDC_BALANCE_CACHE_FALLBACK_TTL_MS: i64 = 180_000;
 const TICK_METADATA_RL_BACKOFF_BASE_MS: i64 = 1_000;
 const TICK_METADATA_RL_BACKOFF_MAX_MS: i64 = 30_000;
+const ACTIVE_MARKETS_MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+
+#[derive(Debug, Deserialize, Default)]
+struct ActiveMarketsEventRow {
+    #[serde(default)]
+    markets: Vec<Market>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum ActiveMarketsEnvelope {
+    EventArray(Vec<ActiveMarketsEventRow>),
+    DataArray { data: Vec<ActiveMarketsEventRow> },
+}
+
+fn parse_active_markets_payload(bytes: &[u8]) -> Result<Vec<Market>> {
+    let parsed: ActiveMarketsEnvelope =
+        serde_json::from_slice(bytes).context("Failed to parse active markets payload")?;
+    let mut markets = Vec::new();
+    match parsed {
+        ActiveMarketsEnvelope::EventArray(events) => {
+            for event in events {
+                markets.extend(event.markets);
+            }
+        }
+        ActiveMarketsEnvelope::DataArray { data } => {
+            for event in data {
+                markets.extend(event.markets);
+            }
+        }
+    }
+    Ok(markets)
+}
 
 pub struct ClobClientHandle {
     pub client: ClobClient<Authenticated<Normal>>,
@@ -2030,52 +2063,29 @@ impl PolymarketApi {
             .context("Failed to fetch all active markets")?;
 
         let status = response.status();
-        let json: Value = response
-            .json()
+        let body = response
+            .bytes()
             .await
-            .context("Failed to parse markets response")?;
+            .context("Failed to read active markets response body")?;
+        if body.len() > ACTIVE_MARKETS_MAX_RESPONSE_BYTES {
+            anyhow::bail!(
+                "active markets payload too large: {} bytes (max {})",
+                body.len(),
+                ACTIVE_MARKETS_MAX_RESPONSE_BYTES
+            );
+        }
 
         if !status.is_success() {
+            let response_text = String::from_utf8_lossy(&body);
+            let truncated = response_text.chars().take(512).collect::<String>();
             log::warn!(
                 "Get all active markets API returned error status {}: {}",
                 status,
-                serde_json::to_string(&json).unwrap_or_default()
+                truncated
             );
-            anyhow::bail!(
-                "API returned error status {}: {}",
-                status,
-                serde_json::to_string(&json).unwrap_or_default()
-            );
+            anyhow::bail!("API returned error status {}: {}", status, truncated);
         }
-
-        // Extract markets from events - events contain markets
-        let mut all_markets = Vec::new();
-
-        if let Some(events) = json.as_array() {
-            for event in events {
-                if let Some(markets) = event.get("markets").and_then(|m| m.as_array()) {
-                    for market_json in markets {
-                        if let Ok(market) = serde_json::from_value::<Market>(market_json.clone()) {
-                            all_markets.push(market);
-                        }
-                    }
-                }
-            }
-        } else if let Some(data) = json.get("data") {
-            if let Some(events) = data.as_array() {
-                for event in events {
-                    if let Some(markets) = event.get("markets").and_then(|m| m.as_array()) {
-                        for market_json in markets {
-                            if let Ok(market) =
-                                serde_json::from_value::<Market>(market_json.clone())
-                            {
-                                all_markets.push(market);
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        let all_markets = parse_active_markets_payload(&body)?;
 
         log::debug!(
             "Fetched {} active markets from events endpoint (limit={}, offset={})",
@@ -7997,5 +8007,24 @@ mod tests {
             hash_a, hash_b,
             "different salts must produce different EIP-712 hashes"
         );
+    }
+
+    #[test]
+    fn active_markets_payload_parser_accepts_supported_envelopes() {
+        let array_payload = br#"[{"markets": []}]"#;
+        let parsed_array = parse_active_markets_payload(array_payload).expect("array parse");
+        assert!(parsed_array.is_empty());
+
+        let data_payload = br#"{"data":[{"markets": []}]}"#;
+        let parsed_data = parse_active_markets_payload(data_payload).expect("data parse");
+        assert!(parsed_data.is_empty());
+    }
+
+    #[test]
+    fn active_markets_payload_parser_rejects_malformed_json() {
+        let malformed = br#"{"data":[{"markets":"bad-shape"}]}"#;
+        let err = parse_active_markets_payload(malformed).expect_err("must fail");
+        let text = err.to_string();
+        assert!(text.contains("Failed to parse active markets payload"));
     }
 }

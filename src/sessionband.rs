@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use crate::size_policy;
-use crate::strategy::Timeframe;
+use crate::strategy::{Timeframe, STRATEGY_ID_SESSIONBAND_V1};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LeadPriceBand {
@@ -220,22 +220,23 @@ fn parse_symbols_env(key: &str, default: &[&str]) -> Vec<String> {
     let parsed = std::env::var(key)
         .ok()
         .map(|raw| {
-            raw.split(',')
-                .map(normalize_symbol)
-                .filter(|s| !s.is_empty())
-                .collect::<Vec<_>>()
+            crate::symbol_ownership::parse_symbols_csv_for_strategy(
+                STRATEGY_ID_SESSIONBAND_V1,
+                &raw,
+            )
         })
         .unwrap_or_default();
     if parsed.is_empty() {
-        return default.iter().map(|v| normalize_symbol(v)).collect();
+        let defaults = default
+            .iter()
+            .map(|v| normalize_symbol(v))
+            .collect::<Vec<_>>();
+        return crate::symbol_ownership::filter_symbols_for_strategy(
+            STRATEGY_ID_SESSIONBAND_V1,
+            defaults.as_slice(),
+        );
     }
-    let mut deduped = Vec::new();
-    for symbol in parsed {
-        if !deduped.iter().any(|existing| existing == &symbol) {
-            deduped.push(symbol);
-        }
-    }
-    deduped
+    crate::symbol_ownership::filter_symbols_for_strategy(STRATEGY_ID_SESSIONBAND_V1, &parsed)
 }
 
 fn parse_timeframes_env(key: &str, default: &[Timeframe]) -> Vec<Timeframe> {

@@ -49,6 +49,19 @@ pub const STRATEGY_ID_MANUAL_PREMARKET_TAKER_V1: &str = "manual_premarket_taker_
 pub const STRATEGY_ID_MANUAL_CHASE_LIMIT_V1: &str = "manual_chase_limit_v1";
 pub const STRATEGY_ID_MANUAL_CHASE_LIMIT_TAKER_V1: &str = "manual_chase_limit_taker_v1";
 
+#[derive(Debug, Clone, Default)]
+struct EntryAckEmptyOrderIdLogWindow {
+    window_start_ms: i64,
+    window_count: u64,
+}
+
+fn entry_ack_empty_order_id_windows(
+) -> &'static StdMutex<HashMap<String, EntryAckEmptyOrderIdLogWindow>> {
+    static WINDOWS: OnceLock<StdMutex<HashMap<String, EntryAckEmptyOrderIdLogWindow>>> =
+        OnceLock::new();
+    WINDOWS.get_or_init(|| StdMutex::new(HashMap::new()))
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 struct MmWeakExitEventCounts {
     probe_24h: u64,
@@ -352,6 +365,11 @@ impl Trader {
             let (tx, mut rx) = tokio::sync::mpsc::channel::<BatchPlaceRequest>(queue_cap);
             let api_for_batch = api.clone();
             tokio::spawn(async move {
+                let mut summary_window_start_ms = chrono::Utc::now().timestamp_millis();
+                let mut summary_request_count = 0_u64;
+                let mut summary_success_count = 0_u64;
+                let mut summary_failed_count = 0_u64;
+                let mut summary_fallback_count = 0_u64;
                 while let Some(first) = rx.recv().await {
                     let mut jobs = vec![first];
                     let deadline =
@@ -379,14 +397,12 @@ impl Trader {
                                 })
                                 .count();
                             let failed_count = results.len().saturating_sub(success_count);
-                            log_event(
-                                "batch_place_submit",
-                                json!({
-                                    "request_count": results.len(),
-                                    "success_count": success_count,
-                                    "failed_count": failed_count
-                                }),
-                            );
+                            summary_request_count = summary_request_count
+                                .saturating_add(u64::try_from(results.len()).ok().unwrap_or(0));
+                            summary_success_count = summary_success_count
+                                .saturating_add(u64::try_from(success_count).ok().unwrap_or(0));
+                            summary_failed_count = summary_failed_count
+                                .saturating_add(u64::try_from(failed_count).ok().unwrap_or(0));
                             for (job, result) in jobs.into_iter().zip(results.into_iter()) {
                                 let send_result = match result {
                                     BatchPlaceOrderResult {
@@ -414,6 +430,10 @@ impl Trader {
                                 jobs.len(),
                                 results.len()
                             );
+                            summary_request_count = summary_request_count
+                                .saturating_add(u64::try_from(jobs.len()).ok().unwrap_or(0));
+                            summary_failed_count = summary_failed_count
+                                .saturating_add(u64::try_from(jobs.len()).ok().unwrap_or(0));
                             log_event(
                                 "batch_place_submit",
                                 json!({
@@ -428,6 +448,12 @@ impl Trader {
                             }
                         }
                         Err(batch_err) => {
+                            summary_request_count = summary_request_count
+                                .saturating_add(u64::try_from(jobs.len()).ok().unwrap_or(0));
+                            summary_failed_count = summary_failed_count
+                                .saturating_add(u64::try_from(jobs.len()).ok().unwrap_or(0));
+                            summary_fallback_count = summary_fallback_count
+                                .saturating_add(u64::try_from(jobs.len()).ok().unwrap_or(0));
                             log_event(
                                 "batch_place_submit",
                                 json!({
@@ -451,6 +477,26 @@ impl Trader {
                                 };
                             }
                         }
+                    }
+                    let now_ms = chrono::Utc::now().timestamp_millis();
+                    if now_ms.saturating_sub(summary_window_start_ms) >= 30_000
+                        && summary_request_count > 0
+                    {
+                        log_event(
+                            "batch_place_submit_summary",
+                            json!({
+                                "window_ms": now_ms.saturating_sub(summary_window_start_ms),
+                                "request_count": summary_request_count,
+                                "success_count": summary_success_count,
+                                "failed_count": summary_failed_count,
+                                "fallback_count": summary_fallback_count
+                            }),
+                        );
+                        summary_window_start_ms = now_ms;
+                        summary_request_count = 0;
+                        summary_success_count = 0;
+                        summary_failed_count = 0;
+                        summary_fallback_count = 0;
                     }
                 }
             });
@@ -6387,26 +6433,78 @@ impl Trader {
                     .filter(|value| !value.is_empty())
                     .map(ToString::to_string);
                 if ack_order_id.is_none() {
-                    log_event(
-                        "entry_ack_empty_order_id",
-                        json!({
-                            "strategy_id": strategy_id.as_str(),
-                            "timeframe": source_timeframe.as_str(),
-                            "entry_mode": entry_mode.as_str(),
-                            "period_timestamp": opportunity.period_timestamp,
-                            "condition_id": opportunity.condition_id,
-                            "token_id": opportunity.token_id,
-                            "price": submit_price,
-                            "units": units,
-                            "size_usd": investment_amount,
-                            "request_id": request_id.clone(),
-                            "api_order_signer_final_route": api_timing.order_signer_final_route.clone(),
-                            "api_order_signer_primary_url": api_timing.order_signer_primary_url.clone(),
-                            "api_order_signer_fallback_url": api_timing.order_signer_fallback_url.clone(),
-                            "api_order_type_effective": api_timing.order_type_effective.clone(),
-                            "response_status": response.status.clone()
-                        }),
+                    let now_ms = chrono::Utc::now().timestamp_millis();
+                    let response_status = response.status.trim().to_string();
+                    let response_status = if response_status.is_empty() {
+                        "unknown".to_string()
+                    } else {
+                        response_status
+                    };
+                    let signer_route = api_timing.order_signer_final_route.clone();
+                    let window_key = format!(
+                        "{}|{}|{}|{}",
+                        strategy_id.as_str(),
+                        opportunity.token_id,
+                        response_status,
+                        signer_route
                     );
+                    let mut emit_immediate = false;
+                    let mut summary_count: Option<u64> = None;
+                    if let Ok(mut windows) = entry_ack_empty_order_id_windows().lock() {
+                        let is_new_key = !windows.contains_key(window_key.as_str());
+                        let entry = windows.entry(window_key.clone()).or_insert_with(|| {
+                            EntryAckEmptyOrderIdLogWindow {
+                                window_start_ms: now_ms,
+                                window_count: 0,
+                            }
+                        });
+                        if is_new_key {
+                            emit_immediate = true;
+                        }
+                        if now_ms.saturating_sub(entry.window_start_ms) >= 60_000 {
+                            if entry.window_count > 0 {
+                                summary_count = Some(entry.window_count);
+                            }
+                            entry.window_start_ms = now_ms;
+                            entry.window_count = 0;
+                        }
+                        entry.window_count = entry.window_count.saturating_add(1);
+                    }
+                    if let Some(count) = summary_count {
+                        log_event(
+                            "entry_ack_empty_order_id_summary",
+                            json!({
+                                "strategy_id": strategy_id.as_str(),
+                                "token_id": opportunity.token_id,
+                                "response_status": response.status.clone(),
+                                "api_order_signer_final_route": api_timing.order_signer_final_route.clone(),
+                                "window_ms": 60_000,
+                                "count": count
+                            }),
+                        );
+                    }
+                    if emit_immediate {
+                        log_event(
+                            "entry_ack_empty_order_id",
+                            json!({
+                                "strategy_id": strategy_id.as_str(),
+                                "timeframe": source_timeframe.as_str(),
+                                "entry_mode": entry_mode.as_str(),
+                                "period_timestamp": opportunity.period_timestamp,
+                                "condition_id": opportunity.condition_id,
+                                "token_id": opportunity.token_id,
+                                "price": submit_price,
+                                "units": units,
+                                "size_usd": investment_amount,
+                                "request_id": request_id.clone(),
+                                "api_order_signer_final_route": api_timing.order_signer_final_route.clone(),
+                                "api_order_signer_primary_url": api_timing.order_signer_primary_url.clone(),
+                                "api_order_signer_fallback_url": api_timing.order_signer_fallback_url.clone(),
+                                "api_order_type_effective": api_timing.order_type_effective.clone(),
+                                "response_status": response.status.clone()
+                            }),
+                        );
+                    }
                 }
                 let tracking_order_id =
                     ack_order_id.unwrap_or_else(|| provisional_order_id.clone());

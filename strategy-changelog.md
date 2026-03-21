@@ -77,6 +77,29 @@ Older entries may reference env keys that were removed in later commits.
 
 ### 2026-03-21
 
+- Shared symbol ownership + discovery/log hardening sweep (`src/symbol_ownership.rs`, `src/main.rs`, `src/evcurve.rs`, `src/sessionband.rs`, `src/polymarket_ws.rs`, `src/api.rs`, `src/trader.rs`, `.env.example`, `.env.full.example`):
+  - symbol ownership is now centralized: `DOGE/BNB/HYPE` are restricted to `endgame_sweep_v1` and `evsnipe_v1`; `evcurve_v1` and `sessionband_v1` bootstraps now filter those symbols out even if provided via env.
+  - Coinbase routing hard rule enforced: `coinbase_product_id_for_market_symbol("DOGE")` now returns no mapping; no `DOGE-USD` Coinbase feed spawn path remains.
+  - EVcurve default symbol universe changed to `BTC,ETH,SOL,XRP` (`EVPOLY_EVCURVE_SYMBOLS` default updated accordingly).
+  - Polymarket WS market discovery defaults tightened to reduce crash pressure:
+    - `EVPOLY_PM_WS_MARKET_DISCOVERY_LIMIT` default `250` (from `1500`)
+    - `EVPOLY_PM_WS_REFRESH_SEC` default `90` (from `30`)
+  - discovery now prefers strategy scope targets, reuses last-good cache on failures, and applies discovery-specific backoff (`90s -> 180s -> 300s` capped).
+  - active-market JSON handling is now bounded + typed in API discovery path (`get_all_active_markets_page_tagged`) to fail cleanly on malformed/oversized payloads.
+  - arbiter/trader/MM logging pressure reductions:
+    - `arbiter_dispatch_rejected` dedupe reason is aggregated to `arbiter_dispatch_rejected_dedupe_summary` (30s window),
+    - batch success spam replaced by `batch_place_submit_summary` (30s window),
+    - `entry_ack_empty_order_id` now emits immediate first-seen + 60s summaries (`entry_ack_empty_order_id_summary`) per `(strategy_id, token_id, response_status, signer_route)`,
+    - `entry_execution_timing` now defaults to selective emit unless `EVPOLY_TRACE_ENTRY_EXECUTION_TIMING=true`.
+  - MM rewards hot-loop telemetry is now change/transition based:
+    - `mm_rewards_quote_plan` (fingerprint change or 60s heartbeat),
+    - `mm_rewards_quote_skew_applied` (cooldown + material-change gate),
+    - `mm_rewards_safe_buffer_applied` (cooldown + effective-change gate),
+    - `mm_rewards_floor_size_upscaled` (aggregated per `(condition_id, token_id, side)` per loop),
+    - `mm_rewards_inventory_janitor_snapshot` (count-change or 300s heartbeat),
+    - `mm_rewards_state_action_mismatch` (transition or 30s heartbeat).
+  - Polymarket WS unstable-feed logs moved to degraded/recovered + heartbeat model (market and user loops), replacing per-loop reconnect/error floods.
+
 - `mm_sport_v1` depth-ratio quote sizing now hard-clamps each BUY quote to 50% of live available USDC notional (`src/main.rs`):
   - applies only when `EVPOLY_MM_SPORT_QUOTE_SIZE_MODE=depth_ratio`.
   - available notional is computed from live `min(USDC balance, USDC allowance)` (cached refresh in MM sport loop).
