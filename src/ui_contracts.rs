@@ -477,7 +477,10 @@ mod tests {
         let ui_market = build_ui_market(&sample_market(), None);
         assert_eq!(ui_market.condition_id, "0xabc");
         assert_eq!(ui_market.market_slug, "btc-updown-15m-1767726000");
-        assert_eq!(ui_market.title, "Will BTC finish above 100,000 this 15m period?");
+        assert_eq!(
+            ui_market.title,
+            "Will BTC finish above 100,000 this 15m period?"
+        );
         assert_eq!(ui_market.symbol.as_deref(), Some("BTC"));
         assert_eq!(ui_market.timeframe.as_deref(), Some("15m"));
         assert_eq!(ui_market.status, "active");

@@ -3,14 +3,14 @@ use crate::coinbase_ws::SharedCoinbaseBookState;
 use crate::config::Config;
 use crate::event_log::log_event;
 use crate::signal_state::SharedSignalState;
-use crate::symbol_ownership;
 use crate::strategy::{
     STRATEGY_ID_ENDGAME_SWEEP_V1, STRATEGY_ID_EVCURVE_V1, STRATEGY_ID_EVSNIPE_V1,
     STRATEGY_ID_MM_REWARDS_V1, STRATEGY_ID_MM_SPORT_V1, STRATEGY_ID_PREMARKET_V1,
     STRATEGY_ID_SESSIONBAND_V1,
 };
-use crate::ui_contracts::{UiDashboardSummary, UiStrategyState};
+use crate::symbol_ownership;
 use crate::trader::Trader;
+use crate::ui_contracts::{UiDashboardSummary, UiStrategyState};
 use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
 use serde::Deserialize;
@@ -1787,7 +1787,9 @@ fn strategy_scope_summary(strategy_slug: &str, strategy_id: &str) -> String {
         _ => {
             let symbols = strategy_symbol_env_key(strategy_slug)
                 .and_then(|key| std::env::var(key).ok())
-                .map(|raw| symbol_ownership::parse_symbols_csv_for_strategy(strategy_id, raw.as_str()))
+                .map(|raw| {
+                    symbol_ownership::parse_symbols_csv_for_strategy(strategy_id, raw.as_str())
+                })
                 .unwrap_or_else(|| symbol_ownership::default_symbols_for_strategy(strategy_id));
             summarize_symbols(symbols.as_slice())
         }
@@ -1869,9 +1871,7 @@ fn global_blocker_reason(health: &Value, enabled_strategy_count: usize) -> Optio
     market_data_blocker_from_health(health)
 }
 
-fn recent_result_text(
-    summary: &crate::tracking_db::UiDashboardDbSummary,
-) -> Option<String> {
+fn recent_result_text(summary: &crate::tracking_db::UiDashboardDbSummary) -> Option<String> {
     if let Some(ts_ms) = summary.last_exit_ts_ms {
         let label = summary
             .last_exit_strategy_id
@@ -1896,7 +1896,11 @@ fn recent_result_text(
             .as_deref()
             .map(strategy_label_from_id)
             .unwrap_or_else(|| "EVPOLY".to_string());
-        return Some(format!("Latest action: {} on {}", humanize_event_type(event_type), label));
+        return Some(format!(
+            "Latest action: {} on {}",
+            humanize_event_type(event_type),
+            label
+        ));
     }
     None
 }
@@ -1940,10 +1944,7 @@ async fn build_ui_dashboard_summary(ctx: &BotAdminContext) -> UiDashboardSummary
         .unwrap_or(0);
     let recent_result = db_summary.as_ref().and_then(recent_result_text);
     let (headline, detail) = if let Some(blocker) = blocker_reason.as_ref() {
-        (
-            "Something needs attention".to_string(),
-            blocker.clone(),
-        )
+        ("Something needs attention".to_string(), blocker.clone())
     } else if open_positions_count > 0 {
         (
             format!(
@@ -1987,7 +1988,9 @@ async fn build_ui_dashboard_summary(ctx: &BotAdminContext) -> UiDashboardSummary
         },
         headline,
         detail,
-        last_activity_at_ms: db_summary.as_ref().and_then(|summary| summary.last_event_ts_ms),
+        last_activity_at_ms: db_summary
+            .as_ref()
+            .and_then(|summary| summary.last_event_ts_ms),
         last_activity_at: db_summary
             .as_ref()
             .and_then(|summary| summary.last_event_ts_ms)
@@ -2001,7 +2004,10 @@ async fn build_ui_dashboard_summary(ctx: &BotAdminContext) -> UiDashboardSummary
         avg_ack_latency_ms: db_summary
             .as_ref()
             .and_then(|summary| summary.avg_ack_latency_ms),
-        total_pnl: db_summary.as_ref().map(|summary| summary.total_pnl).unwrap_or(0.0),
+        total_pnl: db_summary
+            .as_ref()
+            .map(|summary| summary.total_pnl)
+            .unwrap_or(0.0),
         total_trades: db_summary
             .as_ref()
             .map(|summary| summary.total_trades)
@@ -2095,7 +2101,10 @@ async fn build_ui_strategy_states(ctx: &BotAdminContext) -> Vec<UiStrategyState>
             let last_action_age_ms = last_action_at_ms.map(|ts| now_ms.saturating_sub(ts).max(0));
             let state = if !enabled {
                 "disabled".to_string()
-            } else if blocker_reason.is_some() && open_orders_count == 0 && open_positions_count == 0 {
+            } else if blocker_reason.is_some()
+                && open_orders_count == 0
+                && open_positions_count == 0
+            {
                 "blocked".to_string()
             } else if open_positions_count > 0 || open_orders_count > 0 {
                 "running".to_string()
@@ -2121,7 +2130,11 @@ async fn build_ui_strategy_states(ctx: &BotAdminContext) -> Vec<UiStrategyState>
                 "running" if open_orders_count > 0 => format!(
                     "Working {} open {}.",
                     open_orders_count,
-                    if open_orders_count == 1 { "order" } else { "orders" }
+                    if open_orders_count == 1 {
+                        "order"
+                    } else {
+                        "orders"
+                    }
                 ),
                 "watching" => "Watching for the next clean setup.".to_string(),
                 _ => "Ready but waiting for a better market.".to_string(),

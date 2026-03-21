@@ -1081,7 +1081,12 @@ async fn collect_recent_manual_markets(
             if markets.len() >= limit {
                 break;
             }
-            push_unique_market(&mut markets, &mut seen, build_ui_market(&market, None), limit);
+            push_unique_market(
+                &mut markets,
+                &mut seen,
+                build_ui_market(&market, None),
+                limit,
+            );
         }
     }
 
@@ -1108,11 +1113,10 @@ fn manual_run_mode(snapshot: &ManualRunSnapshot) -> &'static str {
 
 fn manual_run_side(snapshot: &ManualRunSnapshot, market: Option<&UiMarket>) -> String {
     if let Some(ui_market) = market {
-        if let Some(side) = ui_market
-            .sides
-            .iter()
-            .find(|side| side.token_id.eq_ignore_ascii_case(snapshot.token_id.as_str()))
-        {
+        if let Some(side) = ui_market.sides.iter().find(|side| {
+            side.token_id
+                .eq_ignore_ascii_case(snapshot.token_id.as_str())
+        }) {
             return side.outcome.clone();
         }
     }
@@ -1184,26 +1188,22 @@ async fn resolve_ui_market_cached(
     if let Some(market) = cache.get(key.as_str()) {
         return Some(market.clone());
     }
-    let resolved =
-        if let Ok(value) =
-            resolve_manual_market_request(state.api.as_ref(), Some(condition_id), Some(market_slug))
-                .await
-        {
-            value
-        } else {
-            resolve_manual_market_request(state.api.as_ref(), Some(condition_id), None)
-                .await
-                .ok()?
-        };
+    let resolved = if let Ok(value) =
+        resolve_manual_market_request(state.api.as_ref(), Some(condition_id), Some(market_slug))
+            .await
+    {
+        value
+    } else {
+        resolve_manual_market_request(state.api.as_ref(), Some(condition_id), None)
+            .await
+            .ok()?
+    };
     let ui_market = build_ui_market(&resolved.0, resolved.1.as_ref());
     cache.insert(key, ui_market.clone());
     Some(ui_market)
 }
 
-async fn enrich_manual_runs(
-    state: &AppState,
-    runs: &[ManualRunSnapshot],
-) -> Vec<UiManualRun> {
+async fn enrich_manual_runs(state: &AppState, runs: &[ManualRunSnapshot]) -> Vec<UiManualRun> {
     let mut cache = HashMap::new();
     let mut out = Vec::with_capacity(runs.len());
     for snapshot in runs {
@@ -1240,7 +1240,8 @@ fn ui_position_side(row: &Value, market: Option<&UiMarket>) -> String {
 fn build_ui_manual_position(row: &Value, market: Option<&UiMarket>) -> UiManualPosition {
     let side = ui_position_side(row, market);
     UiManualPosition {
-        condition_id: json_value_as_string(row, &["conditionId", "condition_id"]).unwrap_or_default(),
+        condition_id: json_value_as_string(row, &["conditionId", "condition_id"])
+            .unwrap_or_default(),
         market_slug: market
             .map(|value| value.market_slug.clone())
             .or_else(|| json_value_as_string(row, &["slug", "market_slug"]))
@@ -1264,21 +1265,23 @@ fn build_ui_manual_position(row: &Value, market: Option<&UiMarket>) -> UiManualP
     }
 }
 
-async fn enrich_manual_positions(
-    state: &AppState,
-    rows: &[Value],
-) -> Vec<UiManualPosition> {
+async fn enrich_manual_positions(state: &AppState, rows: &[Value]) -> Vec<UiManualPosition> {
     let mut cache = HashMap::new();
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
-        let condition_id = json_value_as_string(row, &["conditionId", "condition_id"])
-            .unwrap_or_default();
+        let condition_id =
+            json_value_as_string(row, &["conditionId", "condition_id"]).unwrap_or_default();
         let market_slug = json_value_as_string(row, &["slug", "market_slug"]).unwrap_or_default();
         let market = if condition_id.is_empty() {
             None
         } else {
-            resolve_ui_market_cached(state, &mut cache, condition_id.as_str(), market_slug.as_str())
-                .await
+            resolve_ui_market_cached(
+                state,
+                &mut cache,
+                condition_id.as_str(),
+                market_slug.as_str(),
+            )
+            .await
         };
         out.push(build_ui_manual_position(row, market.as_ref()));
     }
@@ -4655,7 +4658,10 @@ async fn main() -> Result<()> {
         .route("/manual/health", get(handle_health))
         .route("/manual/markets/search", get(handle_manual_market_search))
         .route("/manual/markets/recent", get(handle_manual_market_recent))
-        .route("/manual/markets/by-slug/{slug}", get(handle_manual_market_by_slug))
+        .route(
+            "/manual/markets/by-slug/{slug}",
+            get(handle_manual_market_by_slug),
+        )
         .route(
             "/manual/markets/{condition_id}",
             get(handle_manual_market_by_condition),

@@ -9638,7 +9638,11 @@ GROUP BY strategy_id
         let recent_window_start_ms = chrono::Utc::now()
             .timestamp_millis()
             .saturating_sub(24 * 3_600_000);
-        let prod_only = if reporting_scope.prod_only { 1_i64 } else { 0_i64 };
+        let prod_only = if reporting_scope.prod_only {
+            1_i64
+        } else {
+            0_i64
+        };
         let prod_filter = prod_event_filter_sql("");
         self.with_conn(|conn| {
             let total_trades: u64 = conn
@@ -9786,13 +9790,17 @@ GROUP BY strategy_id
     pub fn latest_strategy_event(&self, strategy_id: &str) -> Result<Option<LatestStrategyEvent>> {
         let normalized_strategy = normalize_strategy_id(strategy_id);
         let reporting_scope = Self::effective_reporting_scope(Some(&ReportingScope::from_env()));
-        let prod_only = if reporting_scope.prod_only { 1_i64 } else { 0_i64 };
+        let prod_only = if reporting_scope.prod_only {
+            1_i64
+        } else {
+            0_i64
+        };
         let prod_filter = prod_event_filter_sql("");
         self.with_conn(|conn| {
             let row = conn
                 .query_row(
-                format!(
-                    r#"
+                    format!(
+                        r#"
 SELECT
     COALESCE(NULLIF(TRIM(strategy_id), ''), 'legacy_default'),
     ts_ms,
@@ -9806,21 +9814,21 @@ WHERE COALESCE(NULLIF(TRIM(strategy_id), ''), 'legacy_default') = ?1
 ORDER BY ts_ms DESC, id DESC
 LIMIT 1
 "#,
-                    prod_filter
+                        prod_filter
+                    )
+                    .as_str(),
+                    params![normalized_strategy, prod_only],
+                    |row| {
+                        Ok(LatestStrategyEvent {
+                            strategy_id: normalize_strategy_id(row.get::<_, String>(0)?.as_str()),
+                            ts_ms: row.get(1)?,
+                            event_type: row.get(2)?,
+                            pnl_usd: row.get(3)?,
+                            condition_id: row.get(4)?,
+                            token_id: row.get(5)?,
+                        })
+                    },
                 )
-                .as_str(),
-                params![normalized_strategy, prod_only],
-                |row| {
-                    Ok(LatestStrategyEvent {
-                        strategy_id: normalize_strategy_id(row.get::<_, String>(0)?.as_str()),
-                        ts_ms: row.get(1)?,
-                        event_type: row.get(2)?,
-                        pnl_usd: row.get(3)?,
-                        condition_id: row.get(4)?,
-                        token_id: row.get(5)?,
-                    })
-                },
-            )
                 .optional()?;
             Ok(row)
         })
