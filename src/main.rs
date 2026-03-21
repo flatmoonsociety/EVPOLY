@@ -1161,6 +1161,9 @@ const MM_SPORT_DISCOVERY_EMPTY_BACKOFF_MIN_MS: i64 = 5_000;
 const MM_SPORT_DISCOVERY_EMPTY_BACKOFF_MAX_MS: i64 = 5 * 60 * 1_000;
 const MM_SPORT_RATIO_RESUME_MULTIPLIER: f64 = 0.9;
 const MM_SPORT_RATIO_RESUME_CONSECUTIVE_CHECKS: u8 = 2;
+const MM_SPORT_DEPTH_RATIO_USDC_CAP_MULT: f64 = 0.5;
+const MM_SPORT_DEPTH_RATIO_BALANCE_REFRESH_MS: i64 = 5_000;
+const MM_SPORT_DEPTH_RATIO_BALANCE_ERROR_LOG_COOLDOWN_MS: i64 = 30_000;
 
 fn mm_sport_random_range_u64(now_ms: i64, seed_key: &str, min_value: u64, max_value: u64) -> u64 {
     let min_bound = min_value.min(max_value);
@@ -13370,6 +13373,9 @@ async fn main() -> Result<()> {
                     i64,
                 > = std::collections::HashMap::new();
                 let mut last_reconcile_failed_rearm_ms = 0_i64;
+                let mut depth_ratio_available_usdc_cached: Option<f64> = None;
+                let mut depth_ratio_available_usdc_cached_at_ms = 0_i64;
+                let mut depth_ratio_balance_error_log_ms = 0_i64;
 
                 loop {
                     let loop_now_ms = chrono::Utc::now().timestamp_millis();
@@ -14574,6 +14580,72 @@ async fn main() -> Result<()> {
                     });
                     ratio_recovery_streak_by_condition
                         .retain(|condition_id, _| ratio_blocked_conditions.contains(condition_id));
+                    let depth_ratio_quote_cap_usd = if mm_sport_cfg_for_loop.quote_size_mode
+                        == mm::MmSportQuoteSizeMode::DepthRatio
+                    {
+                        let refresh_due = depth_ratio_available_usdc_cached_at_ms <= 0
+                            || now_ms.saturating_sub(depth_ratio_available_usdc_cached_at_ms)
+                                >= MM_SPORT_DEPTH_RATIO_BALANCE_REFRESH_MS;
+                        if refresh_due {
+                            depth_ratio_available_usdc_cached_at_ms = now_ms;
+                            match timeout(
+                                Duration::from_secs(3),
+                                api_for_mm_sport.check_usdc_balance_allowance(),
+                            )
+                            .await
+                            {
+                                Ok(Ok((usdc_balance, usdc_allowance))) => {
+                                    let balance_usd = shares_from_balance_decimal(usdc_balance);
+                                    let allowance_usd = shares_from_balance_decimal(usdc_allowance);
+                                    depth_ratio_available_usdc_cached =
+                                        Some(balance_usd.min(allowance_usd).max(0.0));
+                                }
+                                Ok(Err(err)) => {
+                                    if depth_ratio_available_usdc_cached.is_none() {
+                                        depth_ratio_available_usdc_cached = Some(0.0);
+                                    }
+                                    if now_ms.saturating_sub(depth_ratio_balance_error_log_ms)
+                                        >= MM_SPORT_DEPTH_RATIO_BALANCE_ERROR_LOG_COOLDOWN_MS
+                                    {
+                                        depth_ratio_balance_error_log_ms = now_ms;
+                                        log_event(
+                                            "mm_sport_depth_ratio_balance_check_failed",
+                                            json!({
+                                                "strategy_id": STRATEGY_ID_MM_SPORT_V1,
+                                                "error": err.to_string(),
+                                                "cached_available_usdc": depth_ratio_available_usdc_cached
+                                            }),
+                                        );
+                                    }
+                                }
+                                Err(_) => {
+                                    if depth_ratio_available_usdc_cached.is_none() {
+                                        depth_ratio_available_usdc_cached = Some(0.0);
+                                    }
+                                    if now_ms.saturating_sub(depth_ratio_balance_error_log_ms)
+                                        >= MM_SPORT_DEPTH_RATIO_BALANCE_ERROR_LOG_COOLDOWN_MS
+                                    {
+                                        depth_ratio_balance_error_log_ms = now_ms;
+                                        log_event(
+                                            "mm_sport_depth_ratio_balance_check_failed",
+                                            json!({
+                                                "strategy_id": STRATEGY_ID_MM_SPORT_V1,
+                                                "error": "timeout",
+                                                "cached_available_usdc": depth_ratio_available_usdc_cached
+                                            }),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        depth_ratio_available_usdc_cached
+                            .map(|available_usdc| {
+                                (available_usdc * MM_SPORT_DEPTH_RATIO_USDC_CAP_MULT).max(0.0)
+                            })
+                            .or(Some(0.0))
+                    } else {
+                        None
+                    };
 
                     for market in &active_markets {
                         let prestart_exit_mode =
@@ -15554,10 +15626,28 @@ async fn main() -> Result<()> {
 
                             // Normal MM Sport behavior is strict two-outcome BUY quoting.
                             // If either side is infeasible, this market stays in watch mode.
-                            let target_bid_shares = planned_buy_shares_by_token
+                            let mut target_bid_shares = planned_buy_shares_by_token
                                 .get(token_id)
                                 .copied()
                                 .unwrap_or(0.0);
+                            if mm_sport_cfg_for_loop.quote_size_mode
+                                == mm::MmSportQuoteSizeMode::DepthRatio
+                            {
+                                if let Some(max_quote_notional_usd) = depth_ratio_quote_cap_usd {
+                                    if max_quote_notional_usd.is_finite()
+                                        && max_quote_notional_usd >= 0.0
+                                        && best_bid.is_finite()
+                                        && best_bid > 0.0
+                                    {
+                                        let raw_notional_usd =
+                                            target_bid_shares.max(0.0) * best_bid;
+                                        if raw_notional_usd > max_quote_notional_usd + 1e-9 {
+                                            target_bid_shares =
+                                                (max_quote_notional_usd / best_bid).max(0.0);
+                                        }
+                                    }
+                                }
+                            }
                             if !target_bid_shares.is_finite() || target_bid_shares <= 0.0 {
                                 if !buy_rows.is_empty() && can_buy_action {
                                     let _ = mm_sport_cancel_pending_rows(
@@ -16889,7 +16979,8 @@ async fn main() -> Result<()> {
                             >= competition_refresh_ms
                     {
                         let gamma_scan_pages = mm_cfg_for_loop.auto_scan_limit.max(20);
-                        let page_timeout_ms = mm_rewards_page_timeout_ms(mm_rewards_page_budget_fast);
+                        let page_timeout_ms =
+                            mm_rewards_page_timeout_ms(mm_rewards_page_budget_fast);
                         let gamma_timeout_ms = mm_rewards_gamma_timeout_ms(gamma_scan_pages);
                         let mut all_rows = Vec::new();
                         let mut source_page_rows = 0_usize;

@@ -77,6 +77,12 @@ Older entries may reference env keys that were removed in later commits.
 
 ### 2026-03-21
 
+- `mm_sport_v1` depth-ratio quote sizing now hard-clamps each BUY quote to 50% of live available USDC notional (`src/main.rs`):
+  - applies only when `EVPOLY_MM_SPORT_QUOTE_SIZE_MODE=depth_ratio`.
+  - available notional is computed from live `min(USDC balance, USDC allowance)` (cached refresh in MM sport loop).
+  - per-side target shares are clamped before ratio/min-size/place checks so oversized depth-ratio quotes cannot exceed half of available USDC.
+  - adds throttled telemetry on balance-check failures: `mm_sport_depth_ratio_balance_check_failed`.
+
 - `mm_sport_v1` added a second quote sizing mode `depth_ratio` (as an alternative to multiplier sizing) with asymmetric per-side depth-based BUY sizing (`src/mm/mod.rs`, `src/main.rs`, `.env.example`, `.env.full.example`):
   - new mode key: `EVPOLY_MM_SPORT_QUOTE_SIZE_MODE` with values:
     - `multiple` (existing behavior)
