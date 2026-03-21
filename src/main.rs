@@ -3328,9 +3328,11 @@ async fn main() -> Result<()> {
     // reach the bot during startup bootstrap and reconciliation.
     let _bot_admin_ctx = Arc::new(BotAdminContext::new(
         Arc::new(config.clone()),
+        api.clone(),
         trader_arc.clone(),
         signal_state.clone(),
         coinbase_book_state.clone(),
+        is_simulation,
     ));
     let bot_admin_ctx_for_server = _bot_admin_ctx.clone();
     let api_admin_api = api.clone();

@@ -30,6 +30,10 @@ use polymarket_arbitrage_bot::trader::{
     STRATEGY_ID_MANUAL_CHASE_LIMIT_V1, STRATEGY_ID_MANUAL_PREMARKET_TAKER_V1,
     STRATEGY_ID_MANUAL_PREMARKET_V1,
 };
+use polymarket_arbitrage_bot::ui_contracts::{
+    build_ui_market, manual_mode_label, manual_run_kind_label, manual_run_status_label,
+    manual_side_label, UiManualHealth, UiManualPosition, UiManualRun, UiMarket,
+};
 use polymarket_client_sdk::clob::types::response::OpenOrderResponse;
 use polymarket_client_sdk::clob::types::OrderStatusType;
 use rust_decimal::Decimal;
@@ -46,6 +50,10 @@ const MANUAL_TP_SUBMIT_ATTEMPTS: u32 = 3;
 const MANUAL_TP_RETRY_DELAY_MS: u64 = 250;
 const MANUAL_MIN_PRICE: f64 = 0.001;
 const MANUAL_MAX_PRICE: f64 = 0.999;
+const MANUAL_MARKET_SEARCH_LIMIT_DEFAULT: usize = 12;
+const MANUAL_MARKET_SEARCH_LIMIT_MAX: usize = 24;
+const MANUAL_MARKET_SEARCH_PAGE_SIZE: u32 = 100;
+const MANUAL_MARKET_SEARCH_MAX_PAGES: u32 = 3;
 
 #[derive(Parser, Debug)]
 #[command(name = "manual_bot")]
@@ -328,6 +336,19 @@ struct PositionsQuery {
 #[serde(deny_unknown_fields)]
 struct BalanceQuery {
     wallet: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct MarketSearchQuery {
+    q: Option<String>,
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct MarketRecentQuery {
+    limit: Option<usize>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -810,6 +831,458 @@ async fn resolve_manual_market_request(
         .await
         .with_context(|| format!("failed to resolve condition_id={}", condition_id))?;
     Ok((market_from_details(&details), Some(details)))
+}
+
+fn market_query_limit(limit: Option<usize>) -> usize {
+    limit
+        .unwrap_or(MANUAL_MARKET_SEARCH_LIMIT_DEFAULT)
+        .clamp(1, MANUAL_MARKET_SEARCH_LIMIT_MAX)
+}
+
+fn normalize_search_query(raw: Option<&str>) -> Option<String> {
+    raw.map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+fn search_tokens(raw: &str) -> Vec<String> {
+    raw.split(|ch: char| !ch.is_ascii_alphanumeric())
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+        .collect()
+}
+
+fn market_match_score(query: &str, market: &UiMarket) -> Option<i32> {
+    let normalized_query = query.trim().to_ascii_lowercase();
+    if normalized_query.is_empty() {
+        return None;
+    }
+
+    let title = market.title.to_ascii_lowercase();
+    let slug = market.market_slug.to_ascii_lowercase();
+    let subtitle = market.subtitle.to_ascii_lowercase();
+    let description = market
+        .description
+        .as_deref()
+        .map(|value| value.to_ascii_lowercase())
+        .unwrap_or_default();
+    let symbol = market
+        .symbol
+        .as_deref()
+        .map(|value| value.to_ascii_lowercase())
+        .unwrap_or_default();
+    let timeframe = market
+        .timeframe
+        .as_deref()
+        .map(|value| value.to_ascii_lowercase())
+        .unwrap_or_default();
+    let combined = format!("{title} {slug} {subtitle} {description} {symbol} {timeframe}");
+
+    let tokens = search_tokens(normalized_query.as_str());
+    if tokens.is_empty() {
+        return None;
+    }
+
+    let query_hits = combined.contains(normalized_query.as_str());
+    let all_token_hits = tokens.iter().all(|token| combined.contains(token.as_str()));
+    if !query_hits && !all_token_hits {
+        return None;
+    }
+
+    let mut score = 0_i32;
+    if slug == normalized_query {
+        score += 2_000;
+    }
+    if title == normalized_query {
+        score += 1_900;
+    }
+    if symbol == normalized_query {
+        score += 1_700;
+    }
+    if timeframe == normalized_query {
+        score += 1_400;
+    }
+    if title.starts_with(normalized_query.as_str()) {
+        score += 800;
+    }
+    if title.contains(normalized_query.as_str()) {
+        score += 600;
+    }
+    if slug.contains(normalized_query.as_str()) {
+        score += 500;
+    }
+    if subtitle.contains(normalized_query.as_str()) {
+        score += 250;
+    }
+    if description.contains(normalized_query.as_str()) {
+        score += 150;
+    }
+    score += tokens
+        .iter()
+        .filter(|token| title.contains(token.as_str()))
+        .count() as i32
+        * 60;
+    score += tokens
+        .iter()
+        .filter(|token| slug.contains(token.as_str()))
+        .count() as i32
+        * 40;
+    score += i32::from(market.tradable) * 25;
+    Some(score.max(1))
+}
+
+fn push_unique_market(
+    markets: &mut Vec<UiMarket>,
+    seen: &mut HashSet<String>,
+    market: UiMarket,
+    limit: usize,
+) {
+    if markets.len() >= limit {
+        return;
+    }
+    let key = market.condition_id.trim().to_ascii_lowercase();
+    if key.is_empty() || !seen.insert(key) {
+        return;
+    }
+    markets.push(market);
+}
+
+fn market_lookup_error(error: anyhow::Error) -> ApiError {
+    let message = error.to_string();
+    let normalized = message.to_ascii_lowercase();
+    let status = if normalized.contains("not found")
+        || normalized.contains("does not contain market slug")
+        || normalized.contains("invalid market response format")
+    {
+        StatusCode::NOT_FOUND
+    } else {
+        StatusCode::INTERNAL_SERVER_ERROR
+    };
+    ApiError::new(status, message)
+}
+
+async fn search_manual_markets(
+    state: &AppState,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<UiMarket>, ApiError> {
+    let mut candidates = Vec::new();
+    let mut seen = HashSet::new();
+
+    for page_index in 0..MANUAL_MARKET_SEARCH_MAX_PAGES {
+        let offset = page_index.saturating_mul(MANUAL_MARKET_SEARCH_PAGE_SIZE);
+        let page = state
+            .api
+            .get_all_active_markets_page(MANUAL_MARKET_SEARCH_PAGE_SIZE, offset)
+            .await
+            .map_err(|error| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+        if page.is_empty() {
+            break;
+        }
+
+        for market in page {
+            let normalized = build_ui_market(&market, None);
+            let Some(score) = market_match_score(query, &normalized) else {
+                continue;
+            };
+            let key = normalized.condition_id.trim().to_ascii_lowercase();
+            if key.is_empty() || !seen.insert(key) {
+                continue;
+            }
+            candidates.push((score, normalized));
+        }
+
+        if candidates.len() >= limit.saturating_mul(2) {
+            break;
+        }
+    }
+
+    candidates.sort_by(|a, b| {
+        b.0.cmp(&a.0).then_with(|| {
+            a.1.title
+                .to_ascii_lowercase()
+                .cmp(&b.1.title.to_ascii_lowercase())
+        })
+    });
+
+    Ok(candidates
+        .into_iter()
+        .take(limit)
+        .map(|(_, market)| market)
+        .collect())
+}
+
+async fn collect_recent_manual_markets(
+    state: &AppState,
+    limit: usize,
+) -> Result<Vec<UiMarket>, ApiError> {
+    let mut markets = Vec::new();
+    let mut seen = HashSet::new();
+
+    let mut snapshots = collect_run_snapshots(state).await;
+    snapshots.sort_by(|a, b| b.updated_at_ms.cmp(&a.updated_at_ms));
+    for snapshot in snapshots {
+        if markets.len() >= limit {
+            break;
+        }
+        if let Ok((market, details)) = resolve_manual_market_request(
+            state.api.as_ref(),
+            Some(snapshot.condition_id.as_str()),
+            Some(snapshot.market_slug.as_str()),
+        )
+        .await
+        {
+            push_unique_market(
+                &mut markets,
+                &mut seen,
+                build_ui_market(&market, details.as_ref()),
+                limit,
+            );
+        }
+    }
+
+    if markets.len() < limit {
+        if let Ok(rows) = state.api.get_wallet_positions_live(None).await {
+            for row in rows {
+                if markets.len() >= limit {
+                    break;
+                }
+                let Some(condition_id) =
+                    json_value_as_string(&row, &["conditionId", "condition_id"])
+                else {
+                    continue;
+                };
+                let market_slug = json_value_as_string(&row, &["slug", "market_slug"]);
+                if let Ok((market, details)) = resolve_manual_market_request(
+                    state.api.as_ref(),
+                    Some(condition_id.as_str()),
+                    market_slug.as_deref(),
+                )
+                .await
+                {
+                    push_unique_market(
+                        &mut markets,
+                        &mut seen,
+                        build_ui_market(&market, details.as_ref()),
+                        limit,
+                    );
+                }
+            }
+        }
+    }
+
+    if markets.len() < limit {
+        let fallback = state
+            .api
+            .get_all_active_markets_page(limit.saturating_sub(markets.len()) as u32, 0)
+            .await
+            .map_err(|error| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+        for market in fallback {
+            if markets.len() >= limit {
+                break;
+            }
+            push_unique_market(&mut markets, &mut seen, build_ui_market(&market, None), limit);
+        }
+    }
+
+    Ok(markets)
+}
+
+fn manual_run_kind(snapshot: &ManualRunSnapshot) -> &'static str {
+    if manual_run_matches_action(snapshot, ManualOrderAction::Close) {
+        "close"
+    } else {
+        "open"
+    }
+}
+
+fn manual_run_mode(snapshot: &ManualRunSnapshot) -> &'static str {
+    if snapshot.run_type.ends_with("_market") {
+        "market"
+    } else if snapshot.run_type.ends_with("_limit") {
+        "limit"
+    } else {
+        "chase_limit"
+    }
+}
+
+fn manual_run_side(snapshot: &ManualRunSnapshot, market: Option<&UiMarket>) -> String {
+    if let Some(ui_market) = market {
+        if let Some(side) = ui_market
+            .sides
+            .iter()
+            .find(|side| side.token_id.eq_ignore_ascii_case(snapshot.token_id.as_str()))
+        {
+            return side.outcome.clone();
+        }
+    }
+    "Unknown".to_string()
+}
+
+fn build_ui_manual_run(snapshot: &ManualRunSnapshot, market: Option<&UiMarket>) -> UiManualRun {
+    let kind = manual_run_kind(snapshot).to_string();
+    let status = snapshot.status.trim().to_ascii_lowercase();
+    let side = manual_run_side(snapshot, market);
+    let mode = manual_run_mode(snapshot).to_string();
+    let target_shares = snapshot.target_shares.max(0.0);
+    let filled_shares = snapshot.filled_shares.max(0.0);
+    let remaining_shares = (target_shares - filled_shares).max(0.0);
+    let progress_ratio = if target_shares > 0.0 {
+        (filled_shares / target_shares).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let progress_summary = format!(
+        "{:.4} / {:.4} shares",
+        filled_shares.max(0.0),
+        target_shares.max(0.0)
+    );
+
+    UiManualRun {
+        run_id: snapshot.run_id.clone(),
+        kind: kind.clone(),
+        kind_label: manual_run_kind_label(kind.as_str()).to_string(),
+        status: status.clone(),
+        status_label: manual_run_status_label(status.as_str()).to_string(),
+        condition_id: snapshot.condition_id.clone(),
+        market_slug: snapshot.market_slug.clone(),
+        market_title: market
+            .map(|value| value.title.clone())
+            .unwrap_or_else(|| snapshot.market_slug.replace('-', " ")),
+        market_subtitle: market
+            .map(|value| value.subtitle.clone())
+            .unwrap_or_else(|| snapshot.timeframe.clone()),
+        side: side.clone(),
+        side_label: manual_side_label(side.as_str()),
+        mode: mode.clone(),
+        mode_label: manual_mode_label(mode.as_str()).to_string(),
+        target_shares,
+        filled_shares,
+        remaining_shares,
+        requested_size_usd: snapshot.requested_size_usd,
+        progress_ratio,
+        progress_summary,
+        started_at_ms: snapshot.started_at_ms,
+        updated_at_ms: snapshot.updated_at_ms,
+        finished_at_ms: snapshot.finished_at_ms,
+        post_only: snapshot.post_only,
+        tp_price: snapshot.tp_price,
+        error_message: snapshot.last_error.clone(),
+    }
+}
+
+async fn resolve_ui_market_cached(
+    state: &AppState,
+    cache: &mut HashMap<String, UiMarket>,
+    condition_id: &str,
+    market_slug: &str,
+) -> Option<UiMarket> {
+    let key = condition_id.trim().to_ascii_lowercase();
+    if key.is_empty() {
+        return None;
+    }
+    if let Some(market) = cache.get(key.as_str()) {
+        return Some(market.clone());
+    }
+    let resolved =
+        if let Ok(value) =
+            resolve_manual_market_request(state.api.as_ref(), Some(condition_id), Some(market_slug))
+                .await
+        {
+            value
+        } else {
+            resolve_manual_market_request(state.api.as_ref(), Some(condition_id), None)
+                .await
+                .ok()?
+        };
+    let ui_market = build_ui_market(&resolved.0, resolved.1.as_ref());
+    cache.insert(key, ui_market.clone());
+    Some(ui_market)
+}
+
+async fn enrich_manual_runs(
+    state: &AppState,
+    runs: &[ManualRunSnapshot],
+) -> Vec<UiManualRun> {
+    let mut cache = HashMap::new();
+    let mut out = Vec::with_capacity(runs.len());
+    for snapshot in runs {
+        let market = resolve_ui_market_cached(
+            state,
+            &mut cache,
+            snapshot.condition_id.as_str(),
+            snapshot.market_slug.as_str(),
+        )
+        .await;
+        out.push(build_ui_manual_run(snapshot, market.as_ref()));
+    }
+    out
+}
+
+fn ui_position_side(row: &Value, market: Option<&UiMarket>) -> String {
+    if let Some(raw) = json_value_as_string(row, &["outcome", "side", "position_side"]) {
+        return raw;
+    }
+    if let Some(token_id) = json_value_as_string(row, &["asset", "token_id", "tokenId"]) {
+        if let Some(ui_market) = market {
+            if let Some(side) = ui_market
+                .sides
+                .iter()
+                .find(|side| side.token_id.eq_ignore_ascii_case(token_id.as_str()))
+            {
+                return side.outcome.clone();
+            }
+        }
+    }
+    "Unknown".to_string()
+}
+
+fn build_ui_manual_position(row: &Value, market: Option<&UiMarket>) -> UiManualPosition {
+    let side = ui_position_side(row, market);
+    UiManualPosition {
+        condition_id: json_value_as_string(row, &["conditionId", "condition_id"]).unwrap_or_default(),
+        market_slug: market
+            .map(|value| value.market_slug.clone())
+            .or_else(|| json_value_as_string(row, &["slug", "market_slug"]))
+            .unwrap_or_default(),
+        market_title: market
+            .map(|value| value.title.clone())
+            .or_else(|| json_value_as_string(row, &["title", "question", "market_title"]))
+            .unwrap_or_else(|| "Market".to_string()),
+        market_subtitle: market
+            .map(|value| value.subtitle.clone())
+            .unwrap_or_else(|| "".to_string()),
+        side: side.clone(),
+        side_label: manual_side_label(side.as_str()),
+        size: json_value_as_f64(row, &["size", "position_size"]).unwrap_or(0.0),
+        entry_price: json_value_as_f64(row, &["avgPrice", "average_price", "entry_price"]),
+        current_price: json_value_as_f64(row, &["currentPrice", "current_price", "mark_price"]),
+        realized_pnl: json_value_as_f64(row, &["realizedPnl", "realized_pnl"]),
+        unrealized_pnl: json_value_as_f64(row, &["cashPnl", "cash_pnl"]),
+        redeemable: json_value_as_bool(row, &["redeemable"]).unwrap_or(false),
+        mergeable: json_value_as_bool(row, &["mergeable"]).unwrap_or(false),
+    }
+}
+
+async fn enrich_manual_positions(
+    state: &AppState,
+    rows: &[Value],
+) -> Vec<UiManualPosition> {
+    let mut cache = HashMap::new();
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        let condition_id = json_value_as_string(row, &["conditionId", "condition_id"])
+            .unwrap_or_default();
+        let market_slug = json_value_as_string(row, &["slug", "market_slug"]).unwrap_or_default();
+        let market = if condition_id.is_empty() {
+            None
+        } else {
+            resolve_ui_market_cached(state, &mut cache, condition_id.as_str(), market_slug.as_str())
+                .await
+        };
+        out.push(build_ui_manual_position(row, market.as_ref()));
+    }
+    out
 }
 
 fn decimal_to_human_usdc(value: Decimal) -> f64 {
@@ -1837,6 +2310,9 @@ async fn start_manual_order(
         tp_order_id: None,
         last_error: None,
     };
+    let response_snapshot = snapshot.clone();
+    let ui_market = build_ui_market(&market, market_details.as_ref());
+    let ui_run = build_ui_manual_run(&response_snapshot, Some(&ui_market));
 
     let manual_run = Arc::new(ManualRun::new(snapshot));
     {
@@ -2682,6 +3158,8 @@ async fn start_manual_order(
         "tp_price": tp_price,
         "slippage_cents": slippage_cents,
         "warning": budget_warning.or(balance_tracking_warning),
+        "ui_market": ui_market,
+        "ui_run": ui_run,
         "notes": [
             "manual open/close tracks remaining target and auto-stops when filled",
             "manual overfill guard enabled: inflight reserve + fill reconcile timeout"
@@ -2717,6 +3195,20 @@ fn json_value_as_f64(row: &Value, keys: &[&str]) -> Option<f64> {
     for key in keys {
         if let Some(value) = mm_activity_value_as_f64(row.get(*key)).filter(|v| v.is_finite()) {
             return Some(value);
+        }
+    }
+    None
+}
+
+fn json_value_as_string(row: &Value, keys: &[&str]) -> Option<String> {
+    for key in keys {
+        if let Some(value) = row
+            .get(*key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            return Some(value.to_string());
         }
     }
     None
@@ -3121,11 +3613,13 @@ async fn handle_manual_open_runs(
     let runs =
         list_manual_runs_for_action(&state, status_filter.as_deref(), ManualOrderAction::Open)
             .await;
+    let ui_runs = enrich_manual_runs(&state, &runs).await;
 
     Ok(Json(json!({
         "ok": true,
         "count": runs.len(),
-        "runs": runs
+        "runs": runs,
+        "ui_runs": ui_runs
     })))
 }
 
@@ -3143,11 +3637,13 @@ async fn handle_manual_close_runs(
     let runs =
         list_manual_runs_for_action(&state, status_filter.as_deref(), ManualOrderAction::Close)
             .await;
+    let ui_runs = enrich_manual_runs(&state, &runs).await;
 
     Ok(Json(json!({
         "ok": true,
         "count": runs.len(),
-        "runs": runs
+        "runs": runs,
+        "ui_runs": ui_runs
     })))
 }
 
@@ -3178,9 +3674,17 @@ async fn handle_manual_open_run(
 ) -> Result<Json<Value>, ApiError> {
     check_auth(&headers, &state)?;
     let snapshot = manual_run_for_action(&state, run_id.as_str(), ManualOrderAction::Open).await?;
+    let ui_market = resolve_ui_market_cached(
+        &state,
+        &mut HashMap::new(),
+        snapshot.condition_id.as_str(),
+        snapshot.market_slug.as_str(),
+    )
+    .await;
     Ok(Json(json!({
         "ok": true,
-        "run": snapshot
+        "run": snapshot,
+        "ui_run": build_ui_manual_run(&snapshot, ui_market.as_ref())
     })))
 }
 
@@ -3191,9 +3695,85 @@ async fn handle_manual_close_run(
 ) -> Result<Json<Value>, ApiError> {
     check_auth(&headers, &state)?;
     let snapshot = manual_run_for_action(&state, run_id.as_str(), ManualOrderAction::Close).await?;
+    let ui_market = resolve_ui_market_cached(
+        &state,
+        &mut HashMap::new(),
+        snapshot.condition_id.as_str(),
+        snapshot.market_slug.as_str(),
+    )
+    .await;
     Ok(Json(json!({
         "ok": true,
-        "run": snapshot
+        "run": snapshot,
+        "ui_run": build_ui_manual_run(&snapshot, ui_market.as_ref())
+    })))
+}
+
+async fn handle_manual_market_search(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<MarketSearchQuery>,
+) -> Result<Json<Value>, ApiError> {
+    check_auth(&headers, &state)?;
+    let limit = market_query_limit(query.limit);
+    let normalized_query = normalize_search_query(query.q.as_deref());
+    let markets = if let Some(query_value) = normalized_query.as_deref() {
+        search_manual_markets(&state, query_value, limit).await?
+    } else {
+        Vec::new()
+    };
+    Ok(Json(json!({
+        "ok": true,
+        "query": normalized_query,
+        "count": markets.len(),
+        "markets": markets
+    })))
+}
+
+async fn handle_manual_market_recent(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<MarketRecentQuery>,
+) -> Result<Json<Value>, ApiError> {
+    check_auth(&headers, &state)?;
+    let limit = market_query_limit(query.limit);
+    let markets = collect_recent_manual_markets(&state, limit).await?;
+    Ok(Json(json!({
+        "ok": true,
+        "count": markets.len(),
+        "markets": markets
+    })))
+}
+
+async fn handle_manual_market_by_condition(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxPath(condition_id): AxPath<String>,
+) -> Result<Json<Value>, ApiError> {
+    check_auth(&headers, &state)?;
+    let (market, details) =
+        resolve_manual_market_request(state.api.as_ref(), Some(condition_id.as_str()), None)
+            .await
+            .map_err(market_lookup_error)?;
+    Ok(Json(json!({
+        "ok": true,
+        "market": build_ui_market(&market, details.as_ref())
+    })))
+}
+
+async fn handle_manual_market_by_slug(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxPath(slug): AxPath<String>,
+) -> Result<Json<Value>, ApiError> {
+    check_auth(&headers, &state)?;
+    let (market, details) =
+        resolve_manual_market_request(state.api.as_ref(), None, Some(slug.as_str()))
+            .await
+            .map_err(market_lookup_error)?;
+    Ok(Json(json!({
+        "ok": true,
+        "market": build_ui_market(&market, details.as_ref())
     })))
 }
 
@@ -3313,6 +3893,7 @@ async fn handle_manual_positions(
         .await
         .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let (filtered_rows, summary) = summarize_live_positions(&rows, include_zero);
+    let ui_positions = enrich_manual_positions(&state, &filtered_rows).await;
 
     let resolved_wallet = wallet.map(|v| v.to_ascii_lowercase()).or_else(|| {
         state
@@ -3330,7 +3911,8 @@ async fn handle_manual_positions(
         "fetched_at_ms": Utc::now().timestamp_millis(),
         "elapsed_ms": started.elapsed().as_millis() as u64,
         "summary": summary,
-        "positions": filtered_rows
+        "positions": filtered_rows,
+        "ui_positions": ui_positions
     })))
 }
 
@@ -3392,6 +3974,17 @@ async fn handle_manual_balance(
     };
 
     let estimated_total_equity = usdc_balance.map(|bal| bal + total_current_value);
+    let ui_summary = json!({
+        "available_cash_usd": usdc_balance,
+        "available_allowance_usd": usdc_allowance,
+        "positions_value_usd": total_current_value,
+        "estimated_total_equity_usd": estimated_total_equity,
+        "message": if usdc_error.is_some() {
+            "Balance loaded, but cash allowance needs attention."
+        } else {
+            "Cash and open positions are ready."
+        }
+    });
 
     Ok(Json(json!({
         "ok": true,
@@ -3408,6 +4001,7 @@ async fn handle_manual_balance(
         },
         "positions_summary": summary,
         "estimated_total_equity_usd": estimated_total_equity,
+        "ui_summary": ui_summary,
         "note": "estimated_total_equity_usd = usdc balance + live positions current value"
     })))
 }
@@ -3963,11 +4557,26 @@ async fn handle_health(
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     check_auth(&headers, &state)?;
+    let ui_health = UiManualHealth {
+        status: "ok".to_string(),
+        mode: if state.simulation_mode {
+            "dry_run".to_string()
+        } else {
+            "live".to_string()
+        },
+        message: if state.simulation_mode {
+            "Manual trading service is ready in dry run mode.".to_string()
+        } else {
+            "Manual trading service is ready.".to_string()
+        },
+        ready: true,
+    };
     Ok(Json(json!({
         "ok": true,
         "service": "manual_bot",
         "time_utc": Utc::now().to_rfc3339(),
         "wallet": state.api.trading_account_address().ok(),
+        "ui_health": ui_health,
     })))
 }
 
@@ -4044,6 +4653,13 @@ async fn main() -> Result<()> {
     let app = Router::new()
         .route("/health", get(handle_health))
         .route("/manual/health", get(handle_health))
+        .route("/manual/markets/search", get(handle_manual_market_search))
+        .route("/manual/markets/recent", get(handle_manual_market_recent))
+        .route("/manual/markets/by-slug/{slug}", get(handle_manual_market_by_slug))
+        .route(
+            "/manual/markets/{condition_id}",
+            get(handle_manual_market_by_condition),
+        )
         .route("/manual/premarket", post(handle_manual_premarket))
         .route("/manual/open", post(handle_manual_open))
         .route("/manual/close", post(handle_manual_close))

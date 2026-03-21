@@ -341,6 +341,14 @@ impl Trader {
         self.simulation_tracker.clone()
     }
 
+    pub fn tracking_db(&self) -> Option<Arc<TrackingDb>> {
+        self.tracking_db.clone()
+    }
+
+    pub fn is_simulation_mode(&self) -> bool {
+        self.simulation_mode
+    }
+
     pub fn new(
         api: Arc<PolymarketApi>,
         config: TradingConfig,

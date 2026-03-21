@@ -677,6 +677,35 @@ pub struct StrategyActivitySummary {
 }
 
 #[derive(Debug, Clone, Default)]
+pub struct UiDashboardDbSummary {
+    pub total_trades: u64,
+    pub total_pnl: f64,
+    pub winning_trades: u64,
+    pub losing_trades: u64,
+    pub avg_ack_latency_ms: Option<f64>,
+    pub ack_sample_count: u64,
+    pub open_positions_count: u64,
+    pub recent_orders_count: u64,
+    pub last_event_ts_ms: Option<i64>,
+    pub last_event_type: Option<String>,
+    pub last_event_strategy_id: Option<String>,
+    pub last_event_pnl_usd: Option<f64>,
+    pub last_exit_ts_ms: Option<i64>,
+    pub last_exit_strategy_id: Option<String>,
+    pub last_exit_pnl_usd: Option<f64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct LatestStrategyEvent {
+    pub strategy_id: String,
+    pub ts_ms: i64,
+    pub event_type: String,
+    pub pnl_usd: Option<f64>,
+    pub condition_id: Option<String>,
+    pub token_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct PendingFilledSideSummary {
     pub buy_fills: u64,
     pub sell_fills: u64,
@@ -9601,6 +9630,199 @@ GROUP BY strategy_id
             let mut out: Vec<StrategyActivitySummary> = map.into_values().collect();
             out.sort_by(|a, b| a.strategy_id.cmp(&b.strategy_id));
             Ok(out)
+        })
+    }
+
+    pub fn summarize_ui_dashboard(&self) -> Result<UiDashboardDbSummary> {
+        let reporting_scope = Self::effective_reporting_scope(Some(&ReportingScope::from_env()));
+        let recent_window_start_ms = chrono::Utc::now()
+            .timestamp_millis()
+            .saturating_sub(24 * 3_600_000);
+        let prod_only = if reporting_scope.prod_only { 1_i64 } else { 0_i64 };
+        let prod_filter = prod_event_filter_sql("");
+        self.with_conn(|conn| {
+            let total_trades: u64 = conn
+                .query_row("SELECT COUNT(*) FROM fills_v2", [], |row| row.get::<_, i64>(0))
+                .unwrap_or(0)
+                .max(0) as u64;
+            let total_pnl: f64 = conn
+                .query_row(
+                    "SELECT COALESCE(SUM(realized_pnl_usd), 0.0) FROM positions_v2",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0.0);
+            let (winning_trades, losing_trades): (u64, u64) = conn
+                .query_row(
+                    format!(
+                        "SELECT \
+                            COALESCE(SUM(CASE WHEN COALESCE(pnl_usd, 0.0) > 0 THEN 1 ELSE 0 END), 0), \
+                            COALESCE(SUM(CASE WHEN COALESCE(pnl_usd, 0.0) < 0 THEN 1 ELSE 0 END), 0) \
+                         FROM trade_events \
+                         WHERE event_type='EXIT' \
+                           AND (?1 = 0 OR ({}))",
+                        prod_filter
+                    )
+                    .as_str(),
+                    params![prod_only],
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?.max(0) as u64,
+                            row.get::<_, i64>(1)?.max(0) as u64,
+                        ))
+                    },
+                )
+                .unwrap_or((0, 0));
+            let (ack_sample_count, avg_ack_latency_ms): (u64, Option<f64>) = conn
+                .query_row(
+                    "SELECT \
+                        COALESCE(SUM(CASE WHEN ack_ts_ms IS NOT NULL AND submit_ts_ms IS NOT NULL AND ack_ts_ms >= submit_ts_ms THEN 1 ELSE 0 END), 0), \
+                        AVG(CASE WHEN ack_ts_ms IS NOT NULL AND submit_ts_ms IS NOT NULL AND ack_ts_ms >= submit_ts_ms THEN CAST(ack_ts_ms - submit_ts_ms AS REAL) END) \
+                     FROM strategy_feature_snapshots_v1",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?.max(0) as u64,
+                            row.get::<_, Option<f64>>(1)?,
+                        ))
+                    },
+                )
+                .unwrap_or((0, None));
+            let open_positions_count: u64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM positions_v2 WHERE status='OPEN'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap_or(0)
+                .max(0) as u64;
+            let recent_orders_count: u64 = conn
+                .query_row(
+                    format!(
+                        "SELECT COUNT(*) FROM trade_events \
+                         WHERE event_type='ENTRY_SUBMIT' \
+                           AND ts_ms >= ?1 \
+                           AND (?2 = 0 OR ({}))",
+                        prod_filter
+                    )
+                    .as_str(),
+                    params![recent_window_start_ms, prod_only],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap_or(0)
+                .max(0) as u64;
+            let last_event = conn
+                .query_row(
+                    format!(
+                        "SELECT \
+                            ts_ms, \
+                            COALESCE(NULLIF(TRIM(event_type), ''), 'UNKNOWN'), \
+                            COALESCE(NULLIF(TRIM(strategy_id), ''), 'legacy_default'), \
+                            pnl_usd \
+                         FROM trade_events \
+                         WHERE (?1 = 0 OR ({})) \
+                         ORDER BY ts_ms DESC, id DESC \
+                         LIMIT 1",
+                        prod_filter
+                    )
+                    .as_str(),
+                    params![prod_only],
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, String>(1)?,
+                            normalize_strategy_id(row.get::<_, String>(2)?.as_str()),
+                            row.get::<_, Option<f64>>(3)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            let last_exit = conn
+                .query_row(
+                    format!(
+                        "SELECT \
+                            ts_ms, \
+                            COALESCE(NULLIF(TRIM(strategy_id), ''), 'legacy_default'), \
+                            pnl_usd \
+                         FROM trade_events \
+                         WHERE event_type='EXIT' \
+                           AND (?1 = 0 OR ({})) \
+                         ORDER BY ts_ms DESC, id DESC \
+                         LIMIT 1",
+                        prod_filter
+                    )
+                    .as_str(),
+                    params![prod_only],
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            normalize_strategy_id(row.get::<_, String>(1)?.as_str()),
+                            row.get::<_, Option<f64>>(2)?,
+                        ))
+                    },
+                )
+                .optional()?;
+
+            Ok(UiDashboardDbSummary {
+                total_trades,
+                total_pnl,
+                winning_trades,
+                losing_trades,
+                avg_ack_latency_ms,
+                ack_sample_count,
+                open_positions_count,
+                recent_orders_count,
+                last_event_ts_ms: last_event.as_ref().map(|row| row.0),
+                last_event_type: last_event.as_ref().map(|row| row.1.clone()),
+                last_event_strategy_id: last_event.as_ref().map(|row| row.2.clone()),
+                last_event_pnl_usd: last_event.as_ref().and_then(|row| row.3),
+                last_exit_ts_ms: last_exit.as_ref().map(|row| row.0),
+                last_exit_strategy_id: last_exit.as_ref().map(|row| row.1.clone()),
+                last_exit_pnl_usd: last_exit.as_ref().and_then(|row| row.2),
+            })
+        })
+    }
+
+    pub fn latest_strategy_event(&self, strategy_id: &str) -> Result<Option<LatestStrategyEvent>> {
+        let normalized_strategy = normalize_strategy_id(strategy_id);
+        let reporting_scope = Self::effective_reporting_scope(Some(&ReportingScope::from_env()));
+        let prod_only = if reporting_scope.prod_only { 1_i64 } else { 0_i64 };
+        let prod_filter = prod_event_filter_sql("");
+        self.with_conn(|conn| {
+            let row = conn
+                .query_row(
+                format!(
+                    r#"
+SELECT
+    COALESCE(NULLIF(TRIM(strategy_id), ''), 'legacy_default'),
+    ts_ms,
+    COALESCE(NULLIF(TRIM(event_type), ''), 'UNKNOWN'),
+    pnl_usd,
+    condition_id,
+    token_id
+FROM trade_events
+WHERE COALESCE(NULLIF(TRIM(strategy_id), ''), 'legacy_default') = ?1
+  AND (?2 = 0 OR ({}))
+ORDER BY ts_ms DESC, id DESC
+LIMIT 1
+"#,
+                    prod_filter
+                )
+                .as_str(),
+                params![normalized_strategy, prod_only],
+                |row| {
+                    Ok(LatestStrategyEvent {
+                        strategy_id: normalize_strategy_id(row.get::<_, String>(0)?.as_str()),
+                        ts_ms: row.get(1)?,
+                        event_type: row.get(2)?,
+                        pnl_usd: row.get(3)?,
+                        condition_id: row.get(4)?,
+                        token_id: row.get(5)?,
+                    })
+                },
+            )
+                .optional()?;
+            Ok(row)
         })
     }
 

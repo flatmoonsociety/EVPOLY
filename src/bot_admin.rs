@@ -1,12 +1,15 @@
+use crate::api::PolymarketApi;
 use crate::coinbase_ws::SharedCoinbaseBookState;
 use crate::config::Config;
 use crate::event_log::log_event;
 use crate::signal_state::SharedSignalState;
+use crate::symbol_ownership;
 use crate::strategy::{
     STRATEGY_ID_ENDGAME_SWEEP_V1, STRATEGY_ID_EVCURVE_V1, STRATEGY_ID_EVSNIPE_V1,
     STRATEGY_ID_MM_REWARDS_V1, STRATEGY_ID_MM_SPORT_V1, STRATEGY_ID_PREMARKET_V1,
     STRATEGY_ID_SESSIONBAND_V1,
 };
+use crate::ui_contracts::{UiDashboardSummary, UiStrategyState};
 use crate::trader::Trader;
 use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
@@ -23,23 +26,29 @@ use std::time::Instant;
 #[derive(Clone)]
 pub struct BotAdminContext {
     pub config: Arc<Config>,
+    pub api: Arc<PolymarketApi>,
     pub trader: Arc<Trader>,
     pub signal_state: SharedSignalState,
     pub coinbase_state: SharedCoinbaseBookState,
+    pub simulation_mode: bool,
 }
 
 impl BotAdminContext {
     pub fn new(
         config: Arc<Config>,
+        api: Arc<PolymarketApi>,
         trader: Arc<Trader>,
         signal_state: SharedSignalState,
         coinbase_state: SharedCoinbaseBookState,
+        simulation_mode: bool,
     ) -> Self {
         Self {
             config,
+            api,
             trader,
             signal_state,
             coinbase_state,
+            simulation_mode,
         }
     }
 }
@@ -1707,6 +1716,436 @@ async fn health_indicators(ctx: &BotAdminContext) -> Value {
     })
 }
 
+fn strategy_label(strategy_slug: &str) -> &'static str {
+    match strategy_slug {
+        "premarket" => "Premarket",
+        "endgame" => "Endgame",
+        "evcurve" => "EVCurve",
+        "evsnipe" => "EVSnipe",
+        "mm" => "MM Rewards",
+        "mm_sport" => "MM Sport",
+        "sessionband" => "SessionBand",
+        _ => "Strategy",
+    }
+}
+
+fn strategy_enabled(strategy_slug: &str) -> bool {
+    strategy_enable_key(strategy_slug)
+        .and_then(|key| std::env::var(key).ok())
+        .and_then(|raw| parse_bool_raw(raw.as_str()))
+        .unwrap_or_else(|| strategy_enable_default(strategy_slug))
+}
+
+fn strategy_slug_for_id(strategy_id: &str) -> Option<&'static str> {
+    let normalized = strategy_id.trim().to_ascii_lowercase();
+    strategy_catalog()
+        .into_iter()
+        .find(|(_, canonical_id, aliases)| {
+            canonical_id.eq_ignore_ascii_case(normalized.as_str())
+                || aliases
+                    .iter()
+                    .any(|alias| alias.eq_ignore_ascii_case(normalized.as_str()))
+        })
+        .map(|(slug, _, _)| slug)
+}
+
+fn strategy_label_from_id(strategy_id: &str) -> String {
+    strategy_slug_for_id(strategy_id)
+        .map(strategy_label)
+        .unwrap_or_else(|| strategy_id)
+        .to_string()
+}
+
+fn strategy_symbol_env_key(strategy_slug: &str) -> Option<&'static str> {
+    match strategy_slug {
+        "endgame" => Some("EVPOLY_ENDGAME_SYMBOLS"),
+        "evcurve" => Some("EVPOLY_EVCURVE_SYMBOLS"),
+        "evsnipe" => Some("EVPOLY_EVSNIPE_SYMBOLS"),
+        "sessionband" => Some("EVPOLY_SESSIONBAND_SYMBOLS"),
+        _ => None,
+    }
+}
+
+fn summarize_symbols(symbols: &[String]) -> String {
+    if symbols.is_empty() {
+        return "Selected markets".to_string();
+    }
+    if symbols.len() <= 4 {
+        return symbols.join(" / ");
+    }
+    format!(
+        "{} +{}",
+        symbols[..4].join(" / "),
+        symbols.len().saturating_sub(4)
+    )
+}
+
+fn strategy_scope_summary(strategy_slug: &str, strategy_id: &str) -> String {
+    match strategy_slug {
+        "mm" => "Reward markets chosen automatically".to_string(),
+        "mm_sport" => "Sports reward markets".to_string(),
+        _ => {
+            let symbols = strategy_symbol_env_key(strategy_slug)
+                .and_then(|key| std::env::var(key).ok())
+                .map(|raw| symbol_ownership::parse_symbols_csv_for_strategy(strategy_id, raw.as_str()))
+                .unwrap_or_else(|| symbol_ownership::default_symbols_for_strategy(strategy_id));
+            summarize_symbols(symbols.as_slice())
+        }
+    }
+}
+
+fn iso_from_ms(ts_ms: i64) -> Option<String> {
+    chrono::DateTime::<Utc>::from_timestamp_millis(ts_ms).map(|dt| dt.to_rfc3339())
+}
+
+fn humanize_event_type(raw: &str) -> String {
+    match raw.trim().to_ascii_uppercase().as_str() {
+        "ENTRY_SUBMIT" => "Submitted an order".to_string(),
+        "ENTRY_ACK" => "Order acknowledged".to_string(),
+        "ENTRY_FILL" => "Opened a position".to_string(),
+        "EXIT" => "Closed a trade".to_string(),
+        "CANCEL" => "Canceled an order".to_string(),
+        other if other.is_empty() => "Updated".to_string(),
+        other => {
+            let mut out = String::new();
+            for (index, chunk) in other.split('_').enumerate() {
+                if index > 0 {
+                    out.push(' ');
+                }
+                let mut chars = chunk.chars();
+                if let Some(first) = chars.next() {
+                    out.push(first.to_ascii_uppercase());
+                    for ch in chars {
+                        out.push(ch.to_ascii_lowercase());
+                    }
+                }
+            }
+            if out.is_empty() {
+                "Updated".to_string()
+            } else {
+                out
+            }
+        }
+    }
+}
+
+fn health_status_value<'a>(health: &'a Value, key: &str) -> Option<&'a Value> {
+    health.get("status").and_then(|status| status.get(key))
+}
+
+fn market_data_blocker_from_health(health: &Value) -> Option<String> {
+    if health_status_value(health, "clob_auth_failure_degraded")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Some("Trading authentication needs to recover.".to_string());
+    }
+    if health_status_value(health, "signal_stale")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Some("Waiting for live market data to recover.".to_string());
+    }
+    if health_status_value(health, "coinbase_stale")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Some("Waiting for price feeds to recover.".to_string());
+    }
+    if health_status_value(health, "failed_events_10m")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        >= 10
+    {
+        return Some("The bot hit repeated runtime errors and needs attention.".to_string());
+    }
+    None
+}
+
+fn global_blocker_reason(health: &Value, enabled_strategy_count: usize) -> Option<String> {
+    if enabled_strategy_count == 0 {
+        return Some("Turn on at least one strategy before you start trading.".to_string());
+    }
+    market_data_blocker_from_health(health)
+}
+
+fn recent_result_text(
+    summary: &crate::tracking_db::UiDashboardDbSummary,
+) -> Option<String> {
+    if let Some(ts_ms) = summary.last_exit_ts_ms {
+        let label = summary
+            .last_exit_strategy_id
+            .as_deref()
+            .map(strategy_label_from_id)
+            .unwrap_or_else(|| "EVPOLY".to_string());
+        let pnl = summary.last_exit_pnl_usd.unwrap_or(0.0);
+        let result = if pnl > 0.000_001 {
+            format!("Last closed trade made +${:.2} on {}", pnl, label)
+        } else if pnl < -0.000_001 {
+            format!("Last closed trade lost ${:.2} on {}", pnl.abs(), label)
+        } else {
+            format!("Last closed trade finished flat on {}", label)
+        };
+        if ts_ms > 0 {
+            return Some(result);
+        }
+    }
+    if let Some(event_type) = summary.last_event_type.as_deref() {
+        let label = summary
+            .last_event_strategy_id
+            .as_deref()
+            .map(strategy_label_from_id)
+            .unwrap_or_else(|| "EVPOLY".to_string());
+        return Some(format!("Latest action: {} on {}", humanize_event_type(event_type), label));
+    }
+    None
+}
+
+async fn fetch_free_balance(ctx: &BotAdminContext) -> Option<f64> {
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(6),
+        ctx.api.check_usdc_balance_allowance(),
+    )
+    .await
+    {
+        Ok(Ok((balance, _allowance))) => balance.to_string().parse::<f64>().ok(),
+        _ => None,
+    }
+}
+
+async fn build_ui_dashboard_summary(ctx: &BotAdminContext) -> UiDashboardSummary {
+    let health = health_indicators(ctx).await;
+    let enabled_strategies = strategy_catalog()
+        .into_iter()
+        .filter_map(|(slug, _, _)| {
+            if strategy_enabled(slug) {
+                Some(strategy_label(slug).to_string())
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    let blocker_reason = global_blocker_reason(&health, enabled_strategies.len());
+    let db_summary = ctx
+        .trader
+        .tracking_db()
+        .and_then(|db| db.summarize_ui_dashboard().ok());
+    let open_positions_count = db_summary
+        .as_ref()
+        .map(|summary| summary.open_positions_count)
+        .unwrap_or(0);
+    let recent_orders_count = db_summary
+        .as_ref()
+        .map(|summary| summary.recent_orders_count)
+        .unwrap_or(0);
+    let recent_result = db_summary.as_ref().and_then(recent_result_text);
+    let (headline, detail) = if let Some(blocker) = blocker_reason.as_ref() {
+        (
+            "Something needs attention".to_string(),
+            blocker.clone(),
+        )
+    } else if open_positions_count > 0 {
+        (
+            format!(
+                "Managing {} open {}",
+                open_positions_count,
+                if open_positions_count == 1 {
+                    "position"
+                } else {
+                    "positions"
+                }
+            ),
+            "EVPOLY is already in the market and is watching those trades closely.".to_string(),
+        )
+    } else if recent_orders_count > 0 {
+        (
+            "Recent orders have been placed".to_string(),
+            "EVPOLY is live and waiting for the next clean setup.".to_string(),
+        )
+    } else if enabled_strategies.is_empty() {
+        (
+            "Choose a strategy to trade".to_string(),
+            "Turn on a strategy first so EVPOLY knows what it should watch.".to_string(),
+        )
+    } else {
+        (
+            "Watching for a better market".to_string(),
+            "Nothing is wrong. EVPOLY is on and waiting for a setup worth taking.".to_string(),
+        )
+    };
+    let detail = if ctx.simulation_mode && blocker_reason.is_none() {
+        format!("{detail} Dry run is on, so orders stay simulated.")
+    } else {
+        detail
+    };
+    UiDashboardSummary {
+        bot_state: "running".to_string(),
+        mode: if ctx.simulation_mode {
+            "dry_run".to_string()
+        } else {
+            "live".to_string()
+        },
+        headline,
+        detail,
+        last_activity_at_ms: db_summary.as_ref().and_then(|summary| summary.last_event_ts_ms),
+        last_activity_at: db_summary
+            .as_ref()
+            .and_then(|summary| summary.last_event_ts_ms)
+            .and_then(iso_from_ms),
+        recent_result,
+        blocker_reason,
+        enabled_strategies,
+        open_positions_count,
+        recent_orders_count,
+        free_balance: fetch_free_balance(ctx).await,
+        avg_ack_latency_ms: db_summary
+            .as_ref()
+            .and_then(|summary| summary.avg_ack_latency_ms),
+        total_pnl: db_summary.as_ref().map(|summary| summary.total_pnl).unwrap_or(0.0),
+        total_trades: db_summary
+            .as_ref()
+            .map(|summary| summary.total_trades)
+            .unwrap_or(0),
+        winning_trades: db_summary
+            .as_ref()
+            .map(|summary| summary.winning_trades)
+            .unwrap_or(0),
+        losing_trades: db_summary
+            .as_ref()
+            .map(|summary| summary.losing_trades)
+            .unwrap_or(0),
+    }
+}
+
+async fn build_ui_strategy_states(ctx: &BotAdminContext) -> Vec<UiStrategyState> {
+    let health = health_indicators(ctx).await;
+    let market_data_blocker = market_data_blocker_from_health(&health);
+    let Some(db) = ctx.trader.tracking_db() else {
+        return strategy_catalog()
+            .into_iter()
+            .map(|(slug, strategy_id, _)| {
+                let enabled = strategy_enabled(slug);
+                UiStrategyState {
+                    strategy_id: strategy_id.to_string(),
+                    slug: slug.to_string(),
+                    label: strategy_label(slug).to_string(),
+                    enabled,
+                    state: if enabled {
+                        "idle".to_string()
+                    } else {
+                        "disabled".to_string()
+                    },
+                    summary: if enabled {
+                        "Waiting for the next clean setup.".to_string()
+                    } else {
+                        "Turn this strategy on when you want EVPOLY to use it.".to_string()
+                    },
+                    scope_summary: strategy_scope_summary(slug, strategy_id),
+                    last_action: None,
+                    last_action_at_ms: None,
+                    last_action_at: None,
+                    blocker_reason: None,
+                    open_orders_count: 0,
+                    open_positions_count: 0,
+                }
+            })
+            .collect();
+    };
+
+    let reporting_scope = crate::tracking_db::ReportingScope::from_env();
+    let activity_rows = db
+        .summarize_strategy_activity_canonical(Some(&reporting_scope))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|row| (row.strategy_id.clone(), row))
+        .collect::<HashMap<_, _>>();
+    let now_ms = Utc::now().timestamp_millis();
+
+    strategy_catalog()
+        .into_iter()
+        .map(|(slug, strategy_id, _)| {
+            let enabled = strategy_enabled(slug);
+            let activity = activity_rows.get(strategy_id);
+            let open_orders_count = activity.map(|row| row.open_pending_orders).unwrap_or(0);
+            let open_positions_count = db
+                .summarize_strategy_mtm_pnl_v2(strategy_id)
+                .ok()
+                .map(|summary| summary.open_positions)
+                .unwrap_or(0);
+            let last_event = db.latest_strategy_event(strategy_id).ok().flatten();
+            let last_action = last_event
+                .as_ref()
+                .map(|event| humanize_event_type(event.event_type.as_str()));
+            let last_action_at_ms = last_event.as_ref().map(|event| event.ts_ms);
+            let last_action_at = last_action_at_ms.and_then(iso_from_ms);
+            let idle_blocker = match slug {
+                "mm" => Some("Waiting for reward markets worth quoting.".to_string()),
+                "mm_sport" => Some("Waiting for sports reward markets worth quoting.".to_string()),
+                _ => None,
+            };
+            let blocker_reason = if !enabled {
+                None
+            } else if let Some(reason) = market_data_blocker.clone() {
+                Some(reason)
+            } else if open_orders_count == 0 && open_positions_count == 0 {
+                idle_blocker
+            } else {
+                None
+            };
+            let last_action_age_ms = last_action_at_ms.map(|ts| now_ms.saturating_sub(ts).max(0));
+            let state = if !enabled {
+                "disabled".to_string()
+            } else if blocker_reason.is_some() && open_orders_count == 0 && open_positions_count == 0 {
+                "blocked".to_string()
+            } else if open_positions_count > 0 || open_orders_count > 0 {
+                "running".to_string()
+            } else if last_action_age_ms.unwrap_or(i64::MAX) <= 6 * 3_600_000 {
+                "watching".to_string()
+            } else {
+                "idle".to_string()
+            };
+            let summary = match state.as_str() {
+                "disabled" => "Turn this strategy on when you want EVPOLY to use it.".to_string(),
+                "blocked" => blocker_reason
+                    .clone()
+                    .unwrap_or_else(|| "Waiting for the blocker to clear.".to_string()),
+                "running" if open_positions_count > 0 => format!(
+                    "Managing {} open {}.",
+                    open_positions_count,
+                    if open_positions_count == 1 {
+                        "position"
+                    } else {
+                        "positions"
+                    }
+                ),
+                "running" if open_orders_count > 0 => format!(
+                    "Working {} open {}.",
+                    open_orders_count,
+                    if open_orders_count == 1 { "order" } else { "orders" }
+                ),
+                "watching" => "Watching for the next clean setup.".to_string(),
+                _ => "Ready but waiting for a better market.".to_string(),
+            };
+
+            UiStrategyState {
+                strategy_id: strategy_id.to_string(),
+                slug: slug.to_string(),
+                label: strategy_label(slug).to_string(),
+                enabled,
+                state,
+                summary,
+                scope_summary: strategy_scope_summary(slug, strategy_id),
+                last_action,
+                last_action_at_ms,
+                last_action_at,
+                blocker_reason,
+                open_orders_count,
+                open_positions_count,
+            }
+        })
+        .collect()
+}
+
 async fn collect_doctor_issues(
     ctx: &BotAdminContext,
     specs: &[BotSettingSpec],
@@ -2134,7 +2573,7 @@ pub async fn try_handle_bot_request(
     body: &str,
     ctx: &BotAdminContext,
 ) -> Option<BotHttpResponse> {
-    if !path.starts_with("/bot") {
+    if !path.starts_with("/bot") && !path.starts_with("/ui") {
         return None;
     }
 
@@ -2218,6 +2657,28 @@ pub async fn try_handle_bot_request(
                 status_code: 200,
                 status_text: "OK",
                 body: payload,
+            }
+        }
+        ("GET", "/ui/summary") | ("GET", "/bot/ui/summary") => {
+            let payload = build_ui_dashboard_summary(ctx).await;
+            BotHttpResponse {
+                status_code: 200,
+                status_text: "OK",
+                body: json!({
+                    "ok": true,
+                    "summary": payload
+                }),
+            }
+        }
+        ("GET", "/ui/strategies") | ("GET", "/bot/ui/strategies") => {
+            let strategies = build_ui_strategy_states(ctx).await;
+            BotHttpResponse {
+                status_code: 200,
+                status_text: "OK",
+                body: json!({
+                    "ok": true,
+                    "strategies": strategies
+                }),
             }
         }
         ("GET", "/bot/strategy") => {
