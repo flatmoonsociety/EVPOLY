@@ -39,12 +39,38 @@ cd "$ROOT"
 
   echo "[$(date -u +'%Y-%m-%dT%H:%M:%SZ')] restart begin"
   # Prevent lock FD inheritance into tmux/child process tree.
-  ./ev restart live 9>&-
+  restart_rc=0
+  if ./ev restart live 9>&-; then
+    echo "[$(date -u +'%Y-%m-%dT%H:%M:%SZ')] restart command ok"
+  else
+    restart_rc=$?
+    echo "[$(date -u +'%Y-%m-%dT%H:%M:%SZ')] restart command failed rc=$restart_rc"
+  fi
 
   sleep 5
 
   echo "[$(date -u +'%Y-%m-%dT%H:%M:%SZ')] status-after"
-  ./ev status
+  status_after="$(./ev status 2>&1 || true)"
+  printf "%s\n" "$status_after"
+
+  if [[ "$restart_rc" != "0" ]]; then
+    if printf "%s\n" "$status_after" | grep -Eq "^session '.*' is running\.$"; then
+      echo "[$(date -u +'%Y-%m-%dT%H:%M:%SZ')] degraded: restart failed but live session still running; keeping last-good process"
+      exit 0
+    fi
+
+    echo "[$(date -u +'%Y-%m-%dT%H:%M:%SZ')] degraded: restart failed with no live session; attempting stale-binary fallback start"
+    if EV_ALLOW_STALE_BINARY_ON_BUILD_FAIL=1 ./ev start live 9>&-; then
+      sleep 5
+      echo "[$(date -u +'%Y-%m-%dT%H:%M:%SZ')] status-after-fallback-start"
+      ./ev status || true
+      echo "[$(date -u +'%Y-%m-%dT%H:%M:%SZ')] fallback start done"
+      exit 0
+    fi
+
+    echo "[$(date -u +'%Y-%m-%dT%H:%M:%SZ')] fallback start failed"
+    exit "$restart_rc"
+  fi
 
   echo "[$(date -u +'%Y-%m-%dT%H:%M:%SZ')] restart done"
 } >> "$LOG_FILE" 2>&1 9>"$LOCK_FILE"

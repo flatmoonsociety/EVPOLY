@@ -21,6 +21,7 @@ AUTO_RESTART_ON_LIVE="${EV_AUTO_RESTART_ON_LIVE:-1}"
 AUTO_RESTART_LIVE_SCHEDULE="${EV_AUTO_RESTART_LIVE_SCHEDULE:-6h}"
 FORCE_REBUILD="${EV_FORCE_REBUILD:-0}"
 FAST_START="${EV_FAST_START:-0}"
+ALLOW_STALE_BINARY_ON_BUILD_FAIL="${EV_ALLOW_STALE_BINARY_ON_BUILD_FAIL:-1}"
 
 usage() {
   cat <<EOF
@@ -43,6 +44,7 @@ Defaults:
 Env overrides:
   EV_SESSION_NAME, EV_BIN_NAME, EV_CONFIG
   EV_FORCE_REBUILD (1/0)
+  EV_ALLOW_STALE_BINARY_ON_BUILD_FAIL (1/0)
   EV_FAST_START (1/0)  # skips heavy startup recoveries for faster boot
   EV_DISK_GUARD_ENABLE (1/0), EV_DISK_GUARD_MIN_FREE_GB
   EV_DISK_AUTO_PRUNE_ENABLE (1/0)
@@ -185,6 +187,19 @@ disk_guard_check() {
   fi
 }
 
+load_local_ev_overrides() {
+  if [[ -f "$ROOT_DIR/.env" ]]; then
+    # shellcheck disable=SC1091
+    source "$ROOT_DIR/.env" || true
+    DISK_GUARD_ENABLE="${EV_DISK_GUARD_ENABLE:-$DISK_GUARD_ENABLE}"
+    DISK_GUARD_MIN_FREE_GB="${EV_DISK_GUARD_MIN_FREE_GB:-$DISK_GUARD_MIN_FREE_GB}"
+    DISK_AUTO_PRUNE_ENABLE="${EV_DISK_AUTO_PRUNE_ENABLE:-$DISK_AUTO_PRUNE_ENABLE}"
+    DISK_AUTO_PRUNE_CROSS_REPOS="${EV_DISK_AUTO_PRUNE_CROSS_REPOS:-$DISK_AUTO_PRUNE_CROSS_REPOS}"
+    DISK_AUTO_PRUNE_DEPLOY_TARGET="${EV_DISK_AUTO_PRUNE_DEPLOY_TARGET:-$DISK_AUTO_PRUNE_DEPLOY_TARGET}"
+    ALLOW_STALE_BINARY_ON_BUILD_FAIL="${EV_ALLOW_STALE_BINARY_ON_BUILD_FAIL:-$ALLOW_STALE_BINARY_ON_BUILD_FAIL}"
+  fi
+}
+
 mode_flag_from() {
   local mode="${1:-live}"
   case "${mode,,}" in
@@ -232,7 +247,16 @@ ensure_release_binary() {
   bin_path="$(release_bin_path)"
   if binary_needs_rebuild; then
     echo "building release binary (code changed or missing binary)..."
-    (cd "$ROOT_DIR" && cargo build --release --bin "$BIN_NAME")
+    if (cd "$ROOT_DIR" && cargo build --release --bin "$BIN_NAME"); then
+      return 0
+    fi
+    local build_status=$?
+    if [[ "$ALLOW_STALE_BINARY_ON_BUILD_FAIL" == "1" && -x "$bin_path" ]]; then
+      echo "build failed (status=$build_status); using stale release binary fallback: $bin_path" >&2
+      return 0
+    fi
+    echo "build failed (status=$build_status); no fallback available." >&2
+    return "$build_status"
   else
     echo "using prebuilt binary: $bin_path"
   fi
@@ -241,15 +265,7 @@ ensure_release_binary() {
 start_session() {
   local mode="${1:-live}"
   local mode_flag
-  if [[ -f "$ROOT_DIR/.env" ]]; then
-    # shellcheck disable=SC1091
-    source "$ROOT_DIR/.env" || true
-    DISK_GUARD_ENABLE="${EV_DISK_GUARD_ENABLE:-$DISK_GUARD_ENABLE}"
-    DISK_GUARD_MIN_FREE_GB="${EV_DISK_GUARD_MIN_FREE_GB:-$DISK_GUARD_MIN_FREE_GB}"
-    DISK_AUTO_PRUNE_ENABLE="${EV_DISK_AUTO_PRUNE_ENABLE:-$DISK_AUTO_PRUNE_ENABLE}"
-    DISK_AUTO_PRUNE_CROSS_REPOS="${EV_DISK_AUTO_PRUNE_CROSS_REPOS:-$DISK_AUTO_PRUNE_CROSS_REPOS}"
-    DISK_AUTO_PRUNE_DEPLOY_TARGET="${EV_DISK_AUTO_PRUNE_DEPLOY_TARGET:-$DISK_AUTO_PRUNE_DEPLOY_TARGET}"
-  fi
+  load_local_ev_overrides
   mode_flag="$(mode_flag_from "$mode")"
   disk_guard_check
   if has_session; then
@@ -440,6 +456,12 @@ main() {
       ;;
     restart)
       local mode="${2:-live}"
+      # Build/preflight first so a compile failure cannot cause downtime.
+      if has_session; then
+        load_local_ev_overrides
+        disk_guard_check
+        ensure_release_binary
+      fi
       stop_session
       start_session "$mode"
       maybe_enable_live_autorestart "$mode"
