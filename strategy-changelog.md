@@ -77,8 +77,20 @@ Older entries may reference env keys that were removed in later commits.
 
 ### 2026-03-21
 
+- `mm_sport_v1` depth-ratio funding safety update (`src/main.rs`):
+  - reduced depth-ratio per-loop USDC cap multiplier from `50%` to `40%` (`MM_SPORT_DEPTH_RATIO_USDC_CAP_MULT=0.4` in runtime code path).
+  - added pair-atomic funding sizing for `EVPOLY_MM_SPORT_QUOTE_SIZE_MODE=depth_ratio`:
+    - computes a strategy remaining BUY budget each loop as `(depth_ratio_cap_usd - active_open_mm_sport_buy_notional_usd)`,
+    - computes both-side pair notionals before per-side placement,
+    - if pair notional exceeds remaining budget, scales both sides down by one shared scale factor,
+    - reserves/decrements remaining budget only when both sides pass pair min-size gating.
+  - ensures bot never intentionally submits first-side BUY on a pair plan that second-side funding cannot satisfy in the same planning pass.
+  - new telemetry:
+    - `mm_sport_depth_ratio_pair_budget_scaled`
+    - `mm_sport_skip_pair_unfunded_budget`
+
 - `mm_sport_v1` urgent depth-ratio BUY-cap fallback hotfix (`src/main.rs`):
-  - fixed depth-ratio cap behavior so `allowance_usd <= 0` no longer hard-zeroes BUY quoting when `balance_usd > 0`; effective available USDC now falls back to balance in this specific stale/invalid allowance case, while preserving the existing 50% cap.
+  - fixed depth-ratio cap behavior so `allowance_usd <= 0` no longer hard-zeroes BUY quoting when `balance_usd > 0`; effective available USDC now falls back to balance in this specific stale/invalid allowance case while preserving depth-ratio cap semantics.
   - added throttled fallback telemetry: `mm_sport_depth_ratio_allowance_zero_fallback` (`strategy_id`, `balance_usd`, `allowance_usd`, `chosen_available_usdc`).
   - added explicit zero-size skip telemetry for depth-ratio BUY path: `mm_sport_depth_ratio_zero_bid_skip` before skip/continue.
   - affects `mm_sport_v1` only, in `EVPOLY_MM_SPORT_QUOTE_SIZE_MODE=depth_ratio`, across all active sports conditions/timeframes/symbols discovered by MM Sport; `mm_rewards_v1` logic unchanged.
