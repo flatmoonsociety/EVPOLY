@@ -77,6 +77,12 @@ Older entries may reference env keys that were removed in later commits.
 
 ### 2026-03-21
 
+- MM rewards inventory-scope attribution guard hardening (`src/tracking_db.rs`, runtime impact in MM rewards janitor path in `src/main.rs`):
+  - `list_mm_wallet_inventory_by_strategy` now returns wallet rows only when the same `(condition_id, token_id)` has strategy-attributed `OPEN` inventory in `positions_v2`.
+  - MM drift reconcile now skips wallet-only rows that have no strategy open attribution (`db_open_positions == 0` and zero DB inventory), preventing synthetic cross-strategy ownership adds.
+  - this prevents `mm_rewards_v1` from inheriting inventory owned by other strategies (e.g., `evsnipe_v1`) on overlapping conditions and reduces false `scope_violation_cross_strategy` blocks.
+  - added regression test: `mm_wallet_inventory_and_reconcile_require_strategy_open_scope`.
+
 - MM inventory-drift reconcile scope guard hotfix (`src/tracking_db.rs`, runtime impact via `src/main.rs` MM Sport reconcile trigger):
   - `reconcile_mm_inventory_drift_from_wallet_tables` now enriches/reconciles only strategy-scoped rows seeded by that strategy’s own MM state/position records.
   - wallet/mid/activity snapshots no longer create new reconcile candidates for unrelated wallet tokens/markets.

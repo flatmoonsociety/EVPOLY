@@ -5978,7 +5978,14 @@ WHERE rn=1
         let mut candidates: Vec<MmInventoryDriftRow> = snapshot
             .rows
             .into_iter()
-            .filter(|row| row.inventory_drift_shares.unwrap_or(0.0).abs() > min_drift_shares)
+            .filter(|row| {
+                // Reconcile only strategy-attributed inventory rows.
+                // Do not synthesize ownership from wallet-only rows that have no strategy open positions.
+                if row.db_open_positions == 0 && row.db_inventory_shares.abs() <= 1e-9 {
+                    return false;
+                }
+                row.inventory_drift_shares.unwrap_or(0.0).abs() > min_drift_shares
+            })
             .collect();
         candidates.sort_by(|a, b| {
             b.inventory_drift_shares
@@ -6607,6 +6614,16 @@ LEFT JOIN mm_market_states_v1 s
 WHERE COALESCE(w.position_size, 0.0) > 1e-9
   AND w.condition_id IS NOT NULL
   AND TRIM(w.condition_id) <> ''
+  AND EXISTS (
+      SELECT 1
+      FROM positions_v2 p
+      WHERE p.strategy_id=?1
+        AND p.status='OPEN'
+        AND p.condition_id = w.condition_id
+        AND p.token_id = w.token_id
+        AND COALESCE(p.entry_units, 0.0) >
+            (COALESCE(p.exit_units, 0.0) + COALESCE(p.inventory_consumed_units, 0.0))
+  )
 GROUP BY w.condition_id, w.token_id
 ORDER BY ABS(wallet_shares) DESC, w.condition_id ASC, w.token_id ASC
 LIMIT ?2
@@ -15046,6 +15063,78 @@ INSERT OR REPLACE INTO wallet_positions_live_latest_v1 (
             .map_err(Into::into)
         })?;
         assert_eq!(reconciled_count, 0);
+
+        drop(db);
+        cleanup_db(&path);
+        Ok(())
+    }
+
+    #[test]
+    fn mm_wallet_inventory_and_reconcile_require_strategy_open_scope() -> Result<()> {
+        let path = temp_db_path("mm_wallet_inventory_scope_guard");
+        let db = TrackingDb::new(&path)?;
+        ensure_wallet_sidecar_tables(&db)?;
+        let wallet_address = configured_wallet_address().unwrap_or_else(|| "0xwallet".to_string());
+        let condition_id = "cond-wallet-scope";
+        let token_id = "token-wallet-scope";
+
+        db.with_conn(|conn| {
+            conn.execute(
+                r#"
+INSERT OR REPLACE INTO wallet_positions_live_latest_v1 (
+    wallet_address, condition_id, token_id, snapshot_ts_ms, position_size, avg_price, cur_price, current_value
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+"#,
+                params![
+                    wallet_address,
+                    condition_id,
+                    token_id,
+                    333_000_i64,
+                    120.0_f64,
+                    0.40_f64,
+                    0.42_f64,
+                    50.4_f64
+                ],
+            )?;
+            Ok(())
+        })?;
+
+        let scoped_rows_empty =
+            db.list_mm_wallet_inventory_by_strategy(STRATEGY_ID_MM_REWARDS_V1, 10)?;
+        assert!(
+            scoped_rows_empty.is_empty(),
+            "wallet-only rows must not appear without strategy open attribution"
+        );
+        let repairs_empty =
+            db.reconcile_mm_inventory_drift_from_wallet_tables(STRATEGY_ID_MM_REWARDS_V1, 1.0, 10)?;
+        assert!(
+            repairs_empty.is_empty(),
+            "wallet-only rows must not be reconciled without strategy open attribution"
+        );
+
+        db.record_trade_event(&TradeEventRecord {
+            event_key: Some("wallet-scope-entry-fill".to_string()),
+            ts_ms: 334_000,
+            period_timestamp: 1_700_500_000,
+            timeframe: "1d".to_string(),
+            strategy_id: STRATEGY_ID_MM_REWARDS_V1.to_string(),
+            asset_symbol: Some("BTC".to_string()),
+            condition_id: Some(condition_id.to_string()),
+            token_id: Some(token_id.to_string()),
+            token_type: Some("BTC Up".to_string()),
+            side: Some("BUY".to_string()),
+            event_type: "ENTRY_FILL".to_string(),
+            price: Some(0.40),
+            units: Some(50.0),
+            notional_usd: Some(20.0),
+            pnl_usd: None,
+            reason: Some("unit_test_wallet_scope".to_string()),
+        })?;
+
+        let scoped_rows = db.list_mm_wallet_inventory_by_strategy(STRATEGY_ID_MM_REWARDS_V1, 10)?;
+        assert_eq!(scoped_rows.len(), 1);
+        assert_eq!(scoped_rows[0].condition_id, condition_id);
+        assert_eq!(scoped_rows[0].token_id, token_id);
 
         drop(db);
         cleanup_db(&path);
