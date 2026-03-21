@@ -5778,9 +5778,10 @@ GROUP BY condition_id, token_id
                     saw_wallet_positions = true;
                     let condition_id: String = row.get(0)?;
                     let token_id: String = row.get(1)?;
-                    let meta = condition_meta.get(condition_id.as_str());
-                    apply_meta(&mut rows, condition_id.as_str(), token_id.as_str(), meta);
-                    if let Some(entry) = rows.get_mut(&(condition_id.clone(), token_id.clone())) {
+                    let key = (condition_id.clone(), token_id.clone());
+                    // Only enrich strategy-scoped rows (seeded by strategy mm state or positions).
+                    // Do not create new rows from wallet-wide inventory snapshots.
+                    if let Some(entry) = rows.get_mut(&key) {
                         entry.wallet_snapshot_ts_ms = row.get(2)?;
                         entry.wallet_inventory_shares = Some(row.get(3)?);
                         entry.wallet_avg_price = row.get(4)?;
@@ -5812,9 +5813,8 @@ GROUP BY condition_id, token_id
                     saw_mid_marks = true;
                     let condition_id: String = row.get(0)?;
                     let token_id: String = row.get(1)?;
-                    let meta = condition_meta.get(condition_id.as_str());
-                    apply_meta(&mut rows, condition_id.as_str(), token_id.as_str(), meta);
-                    if let Some(entry) = rows.get_mut(&(condition_id.clone(), token_id.clone())) {
+                    let key = (condition_id.clone(), token_id.clone());
+                    if let Some(entry) = rows.get_mut(&key) {
                         entry.mid_snapshot_ts_ms = row.get(2)?;
                         entry.wallet_best_bid = row.get(3)?;
                         entry.wallet_mid_price = row.get(4)?;
@@ -5899,9 +5899,8 @@ WHERE rn=1
                     saw_activity_rows = true;
                     let condition_id: String = row.get(0)?;
                     let token_id: String = row.get(1)?;
-                    let meta = condition_meta.get(condition_id.as_str());
-                    apply_meta(&mut rows, condition_id.as_str(), token_id.as_str(), meta);
-                    if let Some(entry) = rows.get_mut(&(condition_id.clone(), token_id.clone())) {
+                    let key = (condition_id.clone(), token_id.clone());
+                    if let Some(entry) = rows.get_mut(&key) {
                         entry.last_wallet_activity_ts_ms = row.get(2)?;
                         entry.last_wallet_activity_type = row.get(3)?;
                         entry.last_inventory_consumed_units = row.get(4)?;
@@ -14996,6 +14995,57 @@ INSERT OR REPLACE INTO positions_unrealized_mid_latest_v1 (
         assert_eq!(row.last_wallet_activity_type.as_deref(), Some("MERGE"));
         assert_eq!(row.last_wallet_activity_ts_ms, Some(121_000));
         assert!((row.wallet_inventory_value_live_usd.unwrap_or_default() - 77.9).abs() < 1e-9);
+
+        drop(db);
+        cleanup_db(&path);
+        Ok(())
+    }
+
+    #[test]
+    fn mm_inventory_reconcile_skips_wallet_rows_outside_strategy_scope() -> Result<()> {
+        let path = temp_db_path("mm_inventory_reconcile_scope_guard");
+        let db = TrackingDb::new(&path)?;
+        ensure_wallet_sidecar_tables(&db)?;
+        let wallet_address = configured_wallet_address().unwrap_or_else(|| "0xwallet".to_string());
+        let foreign_condition = "cond-foreign-wallet-only";
+        let foreign_token = "token-foreign-wallet-only";
+
+        db.with_conn(|conn| {
+            conn.execute(
+                r#"
+INSERT OR REPLACE INTO wallet_positions_live_latest_v1 (
+    wallet_address, condition_id, token_id, snapshot_ts_ms, position_size, avg_price, cur_price, current_value
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+"#,
+                params![
+                    wallet_address,
+                    foreign_condition,
+                    foreign_token,
+                    222_000_i64,
+                    125.0_f64,
+                    0.42_f64,
+                    0.43_f64,
+                    53.75_f64
+                ],
+            )?;
+            Ok(())
+        })?;
+
+        let repairs = db.reconcile_mm_inventory_drift_from_wallet_tables("mm_sport_v1", 1.0, 50)?;
+        assert!(
+            repairs.is_empty(),
+            "wallet-only rows must not be reconciled into strategy ownership"
+        );
+
+        let reconciled_count: i64 = db.with_conn(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM trade_events WHERE strategy_id='mm_sport_v1' AND event_type='ENTRY_FILL_RECONCILED'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+        })?;
+        assert_eq!(reconciled_count, 0);
 
         drop(db);
         cleanup_db(&path);

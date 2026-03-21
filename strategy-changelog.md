@@ -77,6 +77,13 @@ Older entries may reference env keys that were removed in later commits.
 
 ### 2026-03-21
 
+- MM inventory-drift reconcile scope guard hotfix (`src/tracking_db.rs`, runtime impact via `src/main.rs` MM Sport reconcile trigger):
+  - `reconcile_mm_inventory_drift_from_wallet_tables` now enriches/reconciles only strategy-scoped rows seeded by that strategy’s own MM state/position records.
+  - wallet/mid/activity snapshots no longer create new reconcile candidates for unrelated wallet tokens/markets.
+  - prevents cross-strategy ownership contamination (notably `mm_sport_v1` claiming non-sport/MM-rewards markets via `ENTRY_FILL_RECONCILED` drift-add events).
+  - affects MM inventory reconcile behavior for `mm_sport_v1` and `mm_rewards_v1` across all symbols/timeframes by keeping ownership attribution strategy-scoped.
+  - added regression test: `mm_inventory_reconcile_skips_wallet_rows_outside_strategy_scope`.
+
 - `mm_sport_v1` depth-ratio pair-atomic funding update (`src/main.rs`):
   - changed depth-ratio USDC cap multiplier from `50%` to `40%` (`MM_SPORT_DEPTH_RATIO_USDC_CAP_MULT=0.4`).
   - added pair-atomic funding check for `EVPOLY_MM_SPORT_QUOTE_SIZE_MODE=depth_ratio`:
