@@ -77,6 +77,15 @@ Older entries may reference env keys that were removed in later commits.
 
 ### 2026-03-21
 
+- `mm_sport_v1` depth-ratio pair-atomic funding update (`src/main.rs`):
+  - changed depth-ratio USDC cap multiplier from `50%` to `40%` (`MM_SPORT_DEPTH_RATIO_USDC_CAP_MULT=0.4`).
+  - added pair-atomic funding check for `EVPOLY_MM_SPORT_QUOTE_SIZE_MODE=depth_ratio`:
+    - computes both-side planned BUY notionals before any side placement,
+    - if pair notional exceeds depth-ratio cap budget, scales both sides down by one shared factor,
+    - keeps pair submission all-or-nothing at planning stage (if scaled result fails pair min-size checks, no side is planned/placed).
+  - this update is per-market/pair only; no cross-market global budget bucket is used.
+  - new telemetry: `mm_sport_depth_ratio_pair_budget_scaled`.
+
 - `mm_sport_v1` urgent depth-ratio BUY-cap fallback hotfix (`src/main.rs`):
   - fixed depth-ratio cap behavior so `allowance_usd <= 0` no longer hard-zeroes BUY quoting when `balance_usd > 0`; effective available USDC now falls back to balance in this specific stale/invalid allowance case, while preserving the existing 50% cap.
   - added throttled fallback telemetry: `mm_sport_depth_ratio_allowance_zero_fallback` (`strategy_id`, `balance_usd`, `allowance_usd`, `chosen_available_usdc`).

@@ -1162,7 +1162,7 @@ const MM_SPORT_DISCOVERY_EMPTY_BACKOFF_MIN_MS: i64 = 5_000;
 const MM_SPORT_DISCOVERY_EMPTY_BACKOFF_MAX_MS: i64 = 5 * 60 * 1_000;
 const MM_SPORT_RATIO_RESUME_MULTIPLIER: f64 = 0.9;
 const MM_SPORT_RATIO_RESUME_CONSECUTIVE_CHECKS: u8 = 2;
-const MM_SPORT_DEPTH_RATIO_USDC_CAP_MULT: f64 = 0.5;
+const MM_SPORT_DEPTH_RATIO_USDC_CAP_MULT: f64 = 0.4;
 const MM_SPORT_DEPTH_RATIO_BALANCE_REFRESH_MS: i64 = 5_000;
 const MM_SPORT_DEPTH_RATIO_BALANCE_ERROR_LOG_COOLDOWN_MS: i64 = 30_000;
 const MM_SPORT_DEPTH_RATIO_ALLOWANCE_ZERO_FALLBACK_LOG_COOLDOWN_MS: i64 = 30_000;
@@ -15100,7 +15100,7 @@ async fn main() -> Result<()> {
                             let mut down_target_ratio = None;
                             let mut up_raw_quote_shares = None;
                             let mut down_raw_quote_shares = None;
-                            let (quote_floor_shares, up_quote_shares, down_quote_shares) =
+                            let (quote_floor_shares, mut up_quote_shares, mut down_quote_shares) =
                                 match mm_sport_cfg_for_loop.quote_size_mode {
                                     mm::MmSportQuoteSizeMode::Multiple => {
                                         let floor_shares = (market.reward_min_size_shares
@@ -15269,6 +15269,52 @@ async fn main() -> Result<()> {
                                         "down_ratio": down_ratio
                                     }),
                                 );
+                            }
+                            if mm_sport_cfg_for_loop.quote_size_mode
+                                == mm::MmSportQuoteSizeMode::DepthRatio
+                            {
+                                if let Some(pair_budget_usd) = depth_ratio_quote_cap_usd {
+                                    let pair_budget_usd = pair_budget_usd.max(0.0);
+                                    let raw_up_notional_usd =
+                                        up_quote_shares.max(0.0) * up_best_bid.max(0.0);
+                                    let raw_down_notional_usd =
+                                        down_quote_shares.max(0.0) * down_best_bid.max(0.0);
+                                    let raw_pair_notional_usd =
+                                        raw_up_notional_usd + raw_down_notional_usd;
+                                    let mut scale = 1.0_f64;
+                                    if !raw_pair_notional_usd.is_finite()
+                                        || raw_pair_notional_usd <= 0.0
+                                        || !pair_budget_usd.is_finite()
+                                        || pair_budget_usd <= 0.0
+                                    {
+                                        scale = 0.0;
+                                    } else if raw_pair_notional_usd > pair_budget_usd + 1e-9 {
+                                        scale = (pair_budget_usd / raw_pair_notional_usd)
+                                            .clamp(0.0, 1.0);
+                                    }
+                                    if scale < 1.0 - 1e-9 {
+                                        up_quote_shares *= scale;
+                                        down_quote_shares *= scale;
+                                        let scaled_up_notional_usd =
+                                            up_quote_shares.max(0.0) * up_best_bid.max(0.0);
+                                        let scaled_down_notional_usd =
+                                            down_quote_shares.max(0.0) * down_best_bid.max(0.0);
+                                        log_event(
+                                            "mm_sport_depth_ratio_pair_budget_scaled",
+                                            json!({
+                                                "strategy_id": STRATEGY_ID_MM_SPORT_V1,
+                                                "condition_id": market.condition_id,
+                                                "pair_budget_usd": pair_budget_usd,
+                                                "raw_pair_notional_usd": raw_pair_notional_usd,
+                                                "raw_up_notional_usd": raw_up_notional_usd,
+                                                "raw_down_notional_usd": raw_down_notional_usd,
+                                                "scale": scale,
+                                                "scaled_up_notional_usd": scaled_up_notional_usd,
+                                                "scaled_down_notional_usd": scaled_down_notional_usd
+                                            }),
+                                        );
+                                    }
+                                }
                             }
 
                             let reward_min_shares = if mm_sport_cfg_for_loop.require_reward_eligible
