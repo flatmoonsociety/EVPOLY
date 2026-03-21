@@ -271,6 +271,33 @@ pub struct MmSingleMarketSelector {
     pub match_slug: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MmSportQuoteSizeMode {
+    Multiple,
+    DepthRatio,
+}
+
+impl MmSportQuoteSizeMode {
+    fn from_env(raw: Option<String>) -> Self {
+        match raw
+            .unwrap_or_else(|| "multiple".to_string())
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "depth_ratio" | "depth-ratio" | "ratio" => Self::DepthRatio,
+            _ => Self::Multiple,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Multiple => "multiple",
+            Self::DepthRatio => "depth_ratio",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct MmSportConfig {
     pub enable: bool,
@@ -282,6 +309,7 @@ pub struct MmSportConfig {
     pub discovery_refresh_sec: u64,
     pub rewards_page_budget: u32,
     pub min_reward_rate_per_day: f64,
+    pub quote_size_mode: MmSportQuoteSizeMode,
     pub quote_size_mult: f64,
     pub pair_baseline_quote_size_mult: f64,
     pub max_share_ratio: f64,
@@ -332,13 +360,16 @@ impl MmSportConfig {
             rewards_page_budget: env_u32("EVPOLY_MM_SPORT_REWARDS_PAGE_BUDGET", 8).clamp(1, 200),
             min_reward_rate_per_day: env_f64("EVPOLY_MM_SPORT_MIN_REWARD_RATE_PER_DAY", 300.0)
                 .max(0.0),
+            quote_size_mode: MmSportQuoteSizeMode::from_env(
+                std::env::var("EVPOLY_MM_SPORT_QUOTE_SIZE_MODE").ok(),
+            ),
             quote_size_mult: env_f64("EVPOLY_MM_SPORT_QUOTE_SIZE_MULT", 1.2).clamp(0.1, 20.0),
             pair_baseline_quote_size_mult: env_f64(
                 "EVPOLY_MM_SPORT_PAIR_BASELINE_QUOTE_SIZE_MULT",
                 1.2,
             )
             .clamp(0.1, 20.0),
-            max_share_ratio: env_f64("EVPOLY_MM_SPORT_MAX_SHARE_RATIO", 0.02).clamp(0.01, 0.99),
+            max_share_ratio: env_f64("EVPOLY_MM_SPORT_MAX_SHARE_RATIO", 0.05).clamp(0.01, 0.99),
             min_top_depth_usd: env_f64("EVPOLY_MM_SPORT_MIN_TOP_DEPTH_USD", 100_000.0).max(0.0),
             pause_after_fill_sec: env_u64("EVPOLY_MM_SPORT_PAUSE_AFTER_FILL_SEC", 7_200)
                 .clamp(60, 86_400),

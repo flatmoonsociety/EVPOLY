@@ -75,6 +75,20 @@ Older entries may reference env keys that were removed in later commits.
 
 ## Change Log
 
+### 2026-03-21
+
+- `mm_sport_v1` added a second quote sizing mode `depth_ratio` (as an alternative to multiplier sizing) with asymmetric per-side depth-based BUY sizing (`src/mm/mod.rs`, `src/main.rs`, `.env.example`, `.env.full.example`):
+  - new mode key: `EVPOLY_MM_SPORT_QUOTE_SIZE_MODE` with values:
+    - `multiple` (existing behavior)
+    - `depth_ratio` (new behavior)
+  - `depth_ratio` sizing logic:
+    - computes quote size per side from each side’s own external top-bid depth (no forced equal side size),
+    - uses base quote ratio = `50%` of `max_share_ratio` at/below `100k` top-bid shares,
+    - for depth above `100k`, increases on a capped log curve up to `75%` of `max_share_ratio`,
+    - applies a floor clamp to the default multiplier floor (`1.2x reward min size`) in this mode.
+  - `EVPOLY_MM_SPORT_MAX_SHARE_RATIO` runtime default changed from `0.02` to `0.05`.
+  - existing ratio watchdog/pause/cancel guards remain the hard cap enforcement path; this change affects quote sizing input, not the max-ratio safety gate itself.
+
 ### 2026-03-20
 
 - `mm_rewards_v1` dust cleanup now runs automatically on the hourly redemption scheduler slot (default minute `22`) with expanded run telemetry (`src/trader.rs`):

@@ -1288,6 +1288,38 @@ fn mm_sport_target_share_ratio(target_shares: f64, external_top_shares: f64) -> 
     (ratio.is_finite() && ratio >= 0.0).then_some(ratio)
 }
 
+fn mm_sport_quote_ratio_for_depth(max_share_ratio: f64, external_top_shares: f64) -> Option<f64> {
+    if !external_top_shares.is_finite() || external_top_shares <= 0.0 {
+        return None;
+    }
+    let ratio_limit = max_share_ratio.clamp(0.01, 0.99);
+    let base_ratio = (ratio_limit * 0.5).clamp(0.000_001, 0.99);
+    let cap_ratio = (ratio_limit * 0.75).clamp(base_ratio, 0.99);
+    let base_depth_shares = 100_000.0;
+    if external_top_shares <= base_depth_shares {
+        return Some(base_ratio);
+    }
+    // For depth above 100k, increase ratio on a capped log curve up to 75% of max ratio.
+    let curve = (external_top_shares / base_depth_shares)
+        .log10()
+        .clamp(0.0, 1.0);
+    let ratio = base_ratio + ((cap_ratio - base_ratio) * curve);
+    Some(ratio.clamp(base_ratio, cap_ratio))
+}
+
+fn mm_sport_target_shares_for_ratio(external_top_shares: f64, target_ratio: f64) -> Option<f64> {
+    if !external_top_shares.is_finite()
+        || external_top_shares <= 0.0
+        || !target_ratio.is_finite()
+        || target_ratio <= 0.0
+        || target_ratio >= 1.0
+    {
+        return None;
+    }
+    let shares = external_top_shares * target_ratio / (1.0 - target_ratio);
+    (shares.is_finite() && shares > 0.0).then_some(shares)
+}
+
 fn mm_sport_order_matches_target(
     row: &PendingOrderRecord,
     target_price: f64,
@@ -13251,7 +13283,7 @@ async fn main() -> Result<()> {
             );
         } else {
             eprintln!(
-                "🏀 MM Sport enabled (poll_ms={}, event_driven={}, event_fallback_poll_ms={}, ws_stale_ms={}, discovery_refresh_sec={}, rewards_page_budget={}, min_reward_rate_per_day={:.2}, quote_size_mult={:.3}, pair_baseline_quote_size_mult={:.3}, max_share_ratio={:.3}, min_top_depth_usd={:.2}, pause_after_fill_sec={}, bust_window_ms={}, bust_shares_1s={:.2}, bust_pause_sec=[{},{}], ratio_breach_cancel_cooldown_ms={}, ratio_pause_sec={}, post_only={}, quote_expiry_sec=[{},{}], require_reward_eligible={}, pregame_only={}, match_only={}, max_markets={})",
+                "🏀 MM Sport enabled (poll_ms={}, event_driven={}, event_fallback_poll_ms={}, ws_stale_ms={}, discovery_refresh_sec={}, rewards_page_budget={}, min_reward_rate_per_day={:.2}, quote_size_mode={}, quote_size_mult={:.3}, pair_baseline_quote_size_mult={:.3}, max_share_ratio={:.3}, min_top_depth_usd={:.2}, pause_after_fill_sec={}, bust_window_ms={}, bust_shares_1s={:.2}, bust_pause_sec=[{},{}], ratio_breach_cancel_cooldown_ms={}, ratio_pause_sec={}, post_only={}, quote_expiry_sec=[{},{}], require_reward_eligible={}, pregame_only={}, match_only={}, max_markets={})",
                 mm_sport_cfg.poll_ms,
                 mm_sport_cfg.event_driven_enable,
                 mm_sport_cfg.event_fallback_poll_ms,
@@ -13259,6 +13291,7 @@ async fn main() -> Result<()> {
                 mm_sport_cfg.discovery_refresh_sec,
                 mm_sport_cfg.rewards_page_budget,
                 mm_sport_cfg.min_reward_rate_per_day,
+                mm_sport_cfg.quote_size_mode.as_str(),
                 mm_sport_cfg.quote_size_mult,
                 mm_sport_cfg.pair_baseline_quote_size_mult,
                 mm_sport_cfg.max_share_ratio,
@@ -14882,14 +14915,58 @@ async fn main() -> Result<()> {
                                 continue;
                             }
 
-                            let quote_shares =
-                                (market.reward_min_size_shares * market_quote_size_mult).max(1.0);
                             let ratio_limit =
                                 mm_sport_cfg_for_loop.max_share_ratio.clamp(0.01, 0.99);
+                            let mut up_target_ratio = None;
+                            let mut down_target_ratio = None;
+                            let mut up_raw_quote_shares = None;
+                            let mut down_raw_quote_shares = None;
+                            let (quote_floor_shares, up_quote_shares, down_quote_shares) =
+                                match mm_sport_cfg_for_loop.quote_size_mode {
+                                    mm::MmSportQuoteSizeMode::Multiple => {
+                                        let floor_shares = (market.reward_min_size_shares
+                                            * market_quote_size_mult)
+                                            .max(1.0);
+                                        (floor_shares, floor_shares, floor_shares)
+                                    }
+                                    mm::MmSportQuoteSizeMode::DepthRatio => {
+                                        let floor_shares = (market.reward_min_size_shares
+                                            * MM_SPORT_LOW_DEPTH_QUOTE_SIZE_MULT)
+                                            .max(1.0);
+                                        up_target_ratio = mm_sport_quote_ratio_for_depth(
+                                            ratio_limit,
+                                            up_ext_top_bid_shares,
+                                        );
+                                        down_target_ratio = mm_sport_quote_ratio_for_depth(
+                                            ratio_limit,
+                                            down_ext_top_bid_shares,
+                                        );
+                                        up_raw_quote_shares = up_target_ratio.and_then(|ratio| {
+                                            mm_sport_target_shares_for_ratio(
+                                                up_ext_top_bid_shares,
+                                                ratio,
+                                            )
+                                        });
+                                        down_raw_quote_shares =
+                                            down_target_ratio.and_then(|ratio| {
+                                                mm_sport_target_shares_for_ratio(
+                                                    down_ext_top_bid_shares,
+                                                    ratio,
+                                                )
+                                            });
+                                        (
+                                            floor_shares,
+                                            up_raw_quote_shares.unwrap_or(0.0).max(floor_shares),
+                                            down_raw_quote_shares.unwrap_or(0.0).max(floor_shares),
+                                        )
+                                    }
+                                };
                             let up_ratio =
-                                mm_sport_target_share_ratio(quote_shares, up_ext_top_bid_shares);
-                            let down_ratio =
-                                mm_sport_target_share_ratio(quote_shares, down_ext_top_bid_shares);
+                                mm_sport_target_share_ratio(up_quote_shares, up_ext_top_bid_shares);
+                            let down_ratio = mm_sport_target_share_ratio(
+                                down_quote_shares,
+                                down_ext_top_bid_shares,
+                            );
                             let pair_ratio_ok = up_ratio
                                 .map(|ratio| ratio <= ratio_limit + 1e-9)
                                 .unwrap_or(false)
@@ -14947,7 +15024,14 @@ async fn main() -> Result<()> {
                                     json!({
                                         "strategy_id": STRATEGY_ID_MM_SPORT_V1,
                                         "condition_id": market.condition_id,
-                                        "quote_shares": quote_shares,
+                                        "quote_size_mode": mm_sport_cfg_for_loop.quote_size_mode.as_str(),
+                                        "quote_floor_shares": quote_floor_shares,
+                                        "up_quote_shares": up_quote_shares,
+                                        "down_quote_shares": down_quote_shares,
+                                        "up_target_ratio": up_target_ratio,
+                                        "down_target_ratio": down_target_ratio,
+                                        "up_raw_quote_shares": up_raw_quote_shares,
+                                        "down_raw_quote_shares": down_raw_quote_shares,
                                         "max_share_ratio": ratio_limit,
                                         "up_ext_top_bid_shares": up_ext_top_bid_shares,
                                         "down_ext_top_bid_shares": down_ext_top_bid_shares,
@@ -15022,8 +15106,6 @@ async fn main() -> Result<()> {
                                 / down_best_bid.max(0.000_001))
                             .max(1.0)
                             .max(reward_min_shares);
-                            let up_quote_shares = quote_shares;
-                            let down_quote_shares = quote_shares;
                             if up_quote_shares + 1e-9 < up_min_quote_shares
                                 || down_quote_shares + 1e-9 < down_min_quote_shares
                             {
