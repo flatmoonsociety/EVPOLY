@@ -1052,20 +1052,31 @@ impl PolymarketApi {
     }
 
     fn polygon_rpc_http_urls() -> Vec<String> {
-        let mut urls = Vec::new();
+        let mut urls: Vec<String> = Vec::new();
+        let mut push_unique = |url: String| {
+            if !urls.iter().any(|v| v.eq_ignore_ascii_case(url.as_str())) {
+                urls.push(url);
+            }
+        };
+
         if let Some(primary) = Self::env_nonempty("POLY_POLYGON_RPC_HTTP_URL") {
-            urls.push(primary);
+            push_unique(primary);
         }
         if let Some(fallback) = Self::env_nonempty("POLY_POLYGON_RPC_HTTP_FALLBACK_URL") {
-            if !urls
-                .iter()
-                .any(|v| v.eq_ignore_ascii_case(fallback.as_str()))
-            {
-                urls.push(fallback);
-            }
+            push_unique(fallback);
         }
-        if urls.is_empty() {
-            urls.push("https://polygon-rpc.com".to_string());
+
+        // Public Polygon RPC fallbacks validated for this runtime.
+        // Keep env-configured URLs first, then use this pool as resilient backups.
+        for fallback in [
+            "https://polygon.publicnode.com",
+            "https://polygon.drpc.org",
+            "https://tenderly.rpc.polygon.community",
+            "https://poly.api.pocket.network",
+            "https://1rpc.io/matic",
+            "https://polygon.api.onfinality.io/public",
+        ] {
+            push_unique(fallback.to_string());
         }
         urls
     }
