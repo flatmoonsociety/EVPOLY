@@ -73,7 +73,7 @@ const ORDER_SIGNER_AWS_FALLBACK_URL_DEFAULT: &str =
     "https://im23e4zz3k.execute-api.eu-west-1.amazonaws.com/sign/order";
 const SUBMIT_SIGNER_AWS_URL_DEFAULT: &str =
     "https://im23e4zz3k.execute-api.eu-west-1.amazonaws.com/sign/submit";
-const ORDER_SIGNER_PRIMARY_FALLBACK_TIMEOUT_MS: u64 = 500;
+const ORDER_SIGNER_PRIMARY_FALLBACK_TIMEOUT_MS: u64 = 1000;
 const ORDER_SIGNER_DEGRADED_WINDOW: Duration = Duration::from_secs(5 * 60);
 const ORDER_SIGNER_AWS_FORCE_WINDOW: Duration = Duration::from_secs(60 * 60);
 const USDC_BALANCE_CACHE_HIT_TTL_MS: i64 = 60_000;

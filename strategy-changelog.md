@@ -90,6 +90,11 @@ Older entries may reference env keys that were removed in later commits.
     - `EVPOLY_MM_SPORT_QUOTE_EXPIRY_MAX_SEC=300`
   - affected scope: `mm_sport_v1` across discovered sports match markets (pregame inventory exit path and BUY quote rotation), all symbols/timeframes used by MM Sport.
 
+- Order signer timeout tuning for live order submit path (`src/api.rs`):
+  - changed primary signer timeout threshold from `500ms` to `1000ms` (`ORDER_SIGNER_PRIMARY_FALLBACK_TIMEOUT_MS`).
+  - this affects order-submit behavior for all strategies that place CLOB orders (`premarket_v1`, `endgame_sweep_v1`, `evcurve_v1`, `sessionband_v1`, `evsnipe_v1`, `mm_rewards_v1`, `mm_sport_v1`) across all symbols/timeframes.
+  - key path touched: primary signer timeout/fallback switch in builder post flow (`builder_client_primary.post_order` timeout and AWS fallback handoff).
+
 ### 2026-03-21
 
 - MM rewards inventory-scope attribution guard hardening (`src/tracking_db.rs`, runtime impact in MM rewards janitor path in `src/main.rs`):
