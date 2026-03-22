@@ -345,9 +345,9 @@ impl MmSportConfig {
         let bust_pause_max_sec =
             env_u64("EVPOLY_MM_SPORT_BUST_PAUSE_MAX_SEC", 300).clamp(bust_pause_min_sec, 7_200);
         let quote_expiry_min_sec =
-            env_u64("EVPOLY_MM_SPORT_QUOTE_EXPIRY_MIN_SEC", 300).clamp(61, 3_600);
+            env_u64("EVPOLY_MM_SPORT_QUOTE_EXPIRY_MIN_SEC", 180).clamp(61, 3_600);
         let quote_expiry_max_sec =
-            env_u64("EVPOLY_MM_SPORT_QUOTE_EXPIRY_MAX_SEC", 600).clamp(quote_expiry_min_sec, 7_200);
+            env_u64("EVPOLY_MM_SPORT_QUOTE_EXPIRY_MAX_SEC", 300).clamp(quote_expiry_min_sec, 7_200);
         Self {
             enable: env_bool("EVPOLY_STRATEGY_MM_SPORT_ENABLE", false),
             hard_disable: env_bool("EVPOLY_MM_SPORT_HARD_DISABLE", false),

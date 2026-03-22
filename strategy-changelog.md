@@ -75,6 +75,21 @@ Older entries may reference env keys that were removed in later commits.
 
 ## Change Log
 
+### 2026-03-22
+
+- `mm_sport_v1` prestart/exit execution hardening for live inventory unwind (`src/main.rs`, `src/mm/mod.rs`, `.env.example`, `.env.full.example`):
+  - near-start force-exit window changed from `T-5m` to `T-30m` (`MM_SPORT_FORCE_EXIT_WINDOW_MS` now `30 * 60 * 1000`), while keeping the broader prestart exit mode behavior.
+  - force-exit SELL orders now use normal crossing `LIMIT` (`GTD`) with `post_only=false` so they can take bid liquidity immediately and leave remainder resting on book; non-force MM Sport quoting remains maker-style post-only.
+  - MM Sport terminal fill persistence now records both sides:
+    - BUY terminal reconciles keep writing `ENTRY_FILL` (`entry_fill_order:<order_id>`),
+    - SELL terminal reconciles now also write `EXIT` (`exit_fill_order:<order_id>`),
+    enabling complete MM Sport entry/exit fill audit trail in `trade_events`.
+  - added immediate inventory fallback market hydration for conditions with live MM Sport inventory that are missing from current discovery set, reducing prestart gaps where no exit order is live due transient discovery misses.
+  - default MM Sport randomized quote expiry range changed to `180s..300s`:
+    - `EVPOLY_MM_SPORT_QUOTE_EXPIRY_MIN_SEC=180`
+    - `EVPOLY_MM_SPORT_QUOTE_EXPIRY_MAX_SEC=300`
+  - affected scope: `mm_sport_v1` across discovered sports match markets (pregame inventory exit path and BUY quote rotation), all symbols/timeframes used by MM Sport.
+
 ### 2026-03-21
 
 - MM rewards inventory-scope attribution guard hardening (`src/tracking_db.rs`, runtime impact in MM rewards janitor path in `src/main.rs`):
